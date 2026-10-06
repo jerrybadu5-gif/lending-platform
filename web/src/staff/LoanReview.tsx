@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { api, type ActionResult, type LoanDetail } from '../api/client'
+import { api, files, type ActionResult, type LoanDetail } from '../api/client'
 import { AssessmentCard, Button, DataTable, ErrorNote, Field, LoanStepper, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
 import { pillFor, stepFor } from '../lib/loan'
@@ -45,7 +45,10 @@ function Review({ loan }: { loan: LoanDetail }) {
       <div className="flex flex-wrap gap-6 items-start">
         <div className="flex flex-col gap-6" style={{ flex: '3 1 520px', minWidth: 0 }}>
           <section className="ml-card flex flex-col gap-4">
-            <h2 className="ml-h2">Borrower</h2>
+            <div className="flex flex-wrap justify-between items-center gap-3">
+              <h2 className="ml-h2">Borrower</h2>
+              <Link to={`/staff/borrowers/${b.id}`} className="text-[13px]">Open profile and documents</Link>
+            </div>
             <dl className="grid gap-x-6 gap-y-4 m-0" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
               <Fact k="National ID" v={<span className="ml-ref">{b.national_id ?? '—'}</span>} />
               <Fact k="Phone" v={b.phone ?? '—'} />
@@ -83,6 +86,7 @@ function Review({ loan }: { loan: LoanDetail }) {
           {a && <AssessmentCard recommendation={a.recommendation} score={a.risk_score} dti={a.dti} maxDti={a.max_dti}
             monthlyPayment={a.monthly_payment} cap={a.max_recommended_principal} notes={a.notes} />}
           <Decision loan={loan} />
+          <LoanDocuments loan={loan} />
           <section className="ml-card flex flex-col gap-3">
             <h2 className="ml-h2">History</h2>
             <ol className="m-0 pl-[18px] flex flex-col gap-2 text-[13px] leading-[18px]">
@@ -101,8 +105,55 @@ function Fact({ k, v }: { k: string; v: ReactNode }) {
   return <div><dt className="text-[13px] leading-[18px] text-ink-muted font-medium">{k}</dt><dd className="m-0 mt-0.5">{v}</dd></div>
 }
 
+const AGREEMENT_STATES = ['APPROVED', 'ACTIVE', 'ARREARS', 'ARREARS_LATE', 'CLOSED']
+const STATEMENT_STATES = ['ACTIVE', 'ARREARS', 'ARREARS_LATE', 'CLOSED', 'WRITTEN_OFF']
+
+function LoanDocuments({ loan }: { loan: LoanDetail }) {
+  const links = [
+    AGREEMENT_STATES.includes(loan.state) && { href: files.agreement(loan.id), label: 'Loan agreement' },
+    { href: files.schedule(loan.id), label: 'Repayment schedule' },
+    STATEMENT_STATES.includes(loan.state) && { href: files.statement(loan.id), label: 'Statement' },
+  ].filter(Boolean) as { href: string; label: string }[]
+  return (
+    <section className="ml-card flex flex-col gap-3" aria-label="Documents">
+      <h2 className="ml-h2">Print</h2>
+      <div className="flex flex-wrap gap-2">
+        {links.map((l) => <a key={l.label} href={l.href} download className="ml-btn ml-btn-sm no-underline">{l.label} (PDF)</a>)}
+      </div>
+      {loan.state === 'PENDING' && <p className="m-0 text-[13px] text-ink-muted">The loan agreement can be printed once the loan is approved.</p>}
+      {loan.payments.length > 0 && (
+        <>
+          <h3 className="m-0 text-[13px] font-semibold text-ink-muted">Receipts</h3>
+          <ul className="m-0 p-0 list-none flex flex-col gap-1.5 text-[13px]">
+            {loan.payments.slice(0, 6).map((p, i) => (
+              <li key={p.id ?? i} className="flex justify-between gap-3">
+                <span>{formatDate(p.paid_on)} · {formatKina(p.amount)} · {p.method}</span>
+                {p.id != null && <a href={files.receipt(loan.id, p.id)} download>Receipt</a>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
+function KycWarning({ borrowerId }: { borrowerId: number }) {
+  const kyc = useQuery({ queryKey: ['kyc', borrowerId], queryFn: () => api.staff.kyc(borrowerId) })
+  if (!kyc.data || kyc.data.complete) return null
+  return (
+    <div className="ml-alert ml-alert-warning flex flex-col gap-1" role="note">
+      <strong>Documents still needed before approval</strong>
+      <ul className="m-0 pl-[18px]">{kyc.data.missing.map((m) => <li key={m}>{m}</li>)}</ul>
+      <Link to={`/staff/borrowers/${borrowerId}`}>Upload them on the borrower's profile</Link>
+    </div>
+  )
+}
+
 function Decision({ loan }: { loan: LoanDetail }) {
   const qc = useQueryClient()
+  const kyc = useQuery({ queryKey: ['kyc', loan.borrower.id], queryFn: () => api.staff.kyc(loan.borrower.id), enabled: loan.state === 'PENDING' })
+  const kycMissing = kyc.data ? !kyc.data.complete : false
   const [amount, setAmount] = useState(suggestedAmount(loan))
   const [note, setNote] = useState('')
   const [confirmReject, setConfirmReject] = useState(false)
@@ -129,6 +180,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
 
       {loan.state === 'PENDING' && !confirmReject && (
         <>
+          <KycWarning borrowerId={loan.borrower.id} />
           <Field label="Approved amount (PGK)" prefix="K" inputMode="decimal" value={amount}
             onChange={(e) => setAmount(e.target.value)} error={amountError}
             hint={loan.assessment ? `Policy capacity is ${formatKina(loan.assessment.max_recommended_principal)} for this client.` : undefined} />
@@ -138,7 +190,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
               onChange={(e) => setNote(e.target.value)} placeholder="Why this decision, for the next person who reads the file" />
           </div>
           <div className="flex flex-wrap gap-3">
-            <Button variant="primary" disabled={!!amountError || approve.isPending} onClick={() => approve.mutate()}>
+            <Button variant="primary" disabled={!!amountError || approve.isPending || kycMissing} onClick={() => approve.mutate()}>
               Approve {parseKina(amount) ? formatKina(parseKina(amount)) : ''}
             </Button>
             <Button variant="danger" onClick={() => setConfirmReject(true)}>Reject</Button>

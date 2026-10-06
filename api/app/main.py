@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from .backends.base import BackendError, LendingBackend
 from .config import Settings, get_settings
 from .deps import Services
-from .routers import portal, staff
+from .routers import borrowers, documents, portal, staff
 from .security import OtpStore, RateLimiter, SessionStore
 from .sms import make_sms
 from .underwriting import load_policy
@@ -113,6 +113,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"to": phone, "text": sent[-1][1] if sent else None}
 
     app.include_router(staff.router)
+    app.include_router(borrowers.router)
+    app.include_router(documents.router)
     app.include_router(portal.router)
     return app
 

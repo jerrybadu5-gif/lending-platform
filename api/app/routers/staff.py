@@ -22,6 +22,7 @@ from ..domain.models import (
 )
 from ..security import STAFF_COOKIE, StaffSession, end_session, staff_session, start_session
 from ..underwriting import assess_loan
+from .borrowers import borrower_kyc
 
 router = APIRouter(prefix="/api/staff", tags=["staff"])
 APPROVER_ROLES = {"credit manager", "super user", "branch manager"}
@@ -105,6 +106,11 @@ async def approve(
     loan_id: int, body: ApproveIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
     _require_approver(s)
+    if svc.settings.kyc_required_for_approval:
+        detail = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+        kyc = await borrower_kyc(svc, s.cred, detail.borrower.id)
+        if not kyc.complete:
+            raise HTTPException(409, "Upload these documents for the borrower first: " + "; ".join(kyc.missing) + ".")
     return await svc.backend.approve(s.cred, loan_id, body, svc.today())
 
 

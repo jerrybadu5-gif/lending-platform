@@ -11,7 +11,6 @@ from ..deps import Services, services
 from ..domain.models import (
     OtpRequest,
     OtpVerify,
-    PayWay,
     PortalApplicationIn,
     PortalApplicationOut,
     PortalHome,
@@ -19,6 +18,7 @@ from ..domain.models import (
     Quote,
     QuoteIn,
 )
+from ..domain.payways import ways_to_pay
 from ..security import PORTAL_COOKIE, PortalSession, end_session, portal_session, start_session
 from ..underwriting import assess_loan, quote
 
@@ -71,13 +71,7 @@ async def home(me: PortalSession = Depends(portal_session), svc: Services = Depe
         return PortalHome(first_name=name, company_name=svc.settings.company_name, loan=None)
     l = live[0]
     paid = [i for i in l.schedule if i.complete]
-    ways = [
-        PayWay(
-            name="CellMoni or MiCash", how=f"Pay merchant {svc.settings.company_name}, reference {l.payment_reference}"
-        ),
-        PayWay(name="Bank transfer", how=f"Use reference {l.payment_reference} so we can match your payment"),
-        PayWay(name="Cash at our office", how="Bring your loan number and ID"),
-    ]
+    ways = ways_to_pay(svc.settings.company_name, l.payment_reference)
     history = l.payments[:3]
     return PortalHome(
         first_name=name,

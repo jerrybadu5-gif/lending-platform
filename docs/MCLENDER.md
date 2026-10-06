@@ -1,6 +1,6 @@
 # McLender: how it works
 
-**System:** McLender · **Company:** Breez Lending · **Updated:** 06/10/2026
+**System:** McLender · **Company:** Breez Lending · **Updated:** 07/10/2026
 
 ## Pieces
 
@@ -13,6 +13,9 @@
    ├─ staff calls run as the signed-in staff member in Fineract (their roles and maker-checker apply)
    ├─ portal calls run as a limited "portal" Fineract user and only ever read the signed-in borrower's loans
    ├─ affordability check (app/domain/risk.py), stored in Fineract data table dt_loan_assessment
+   ├─ borrowers: Fineract clients + NID identifier + data tables dt_borrower_financials, dt_borrower_profile
+   ├─ KYC files: Fineract client documents (type checked from the file's first bytes, 10 MB limit)
+   └─ PDFs (app/pdf.py, ReportLab): loan agreement, repayment schedule, statement, receipt
    └─ SMS interface (console for now; Digicel PNG and Vodafone PNG adapters at shipping time)
         │
         ▼
@@ -32,28 +35,29 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 | Dashboard | `/staff` | Gross portfolio, active loans, PAR30, due today, waiting approvals, arrears by age |
 | Applications | `/staff/applications` | Pending (with the check result), approved and not disbursed, rejected |
 | Loan review | `/staff/loans/:id` | Borrower facts, schedule, affordability card, approve (amount defaults to policy capacity), reject (reason required, confirmed, SMS sent), record disbursement, history |
+| Borrowers | `/staff/borrowers` | Search by name, phone, NID or employer |
+| New / edit borrower | `/staff/borrowers/new`, `/staff/borrowers/:id/edit` | Personal details, NID, contact, employer and payroll number, income, bank account for payout, next of kin. Must be 18+; phone and NID must be unique |
+| Borrower profile | `/staff/borrowers/:id` | Details, KYC checklist with uploads (ID, payslips, bank statement, payroll deduction authority), documents on file, loans, new loan application (checked at once) |
 | Repayments | `/staff/repayments` | Due today, in arrears, all open; record a repayment by method with a reference; receipt plus SMS |
+| Printed documents | Loan review, repayment receipt | Loan agreement (once approved; marked DRAFT until `MCL_AGREEMENT_REVIEWED=true`), repayment schedule, statement, receipts, all PDF |
 | Borrower sign-in | `/portal/login` | Phone, then a 6-digit SMS code valid for 5 minutes, 5 tries |
-| Borrower home | `/portal` | Left to pay, progress, next or overdue payment, ways to pay with reference, recent payments |
+| Borrower home | `/portal` | Left to pay, progress, next or overdue payment, ways to pay with reference, recent payments, statement and schedule PDFs |
 | Apply | `/portal/apply` | Amount and term chips, live quote, income and debts, sends an application that is checked at once |
 
 ## Security
 
-- Sessions are signed with `MCL_SESSION_SECRET` (itsdangerous) and stored in HttpOnly, SameSite=Strict cookies. They expire after `MCL_SESSION_HOURS`. The staff cookie holds the staff member's Fineract key, signed, so it can't be forged.
+- Sessions live on the server. The HttpOnly, SameSite=Strict cookie holds only a random session id, signed with `MCL_SESSION_SECRET`; the staff member's Fineract key never leaves the server. Sessions expire after `MCL_SESSION_HOURS`, and signing out ends them.
 - Staff sign-in is limited to 10 tries per 5 minutes per user and address. SMS codes are limited to 5 requests per 15 minutes per number and per address. The code request answers the same way for unknown numbers, so it can't be used to find out who borrows from Breez Lending.
 - Approve, reject and disburse need a credit manager role in McLender, and Fineract's own permissions and maker-checker still apply.
+- KYC uploads: the file type is read from the file's first bytes (PDF, JPEG, PNG, WEBP only), never from its name; names are cleaned; 10 MB limit (`MCL_MAX_UPLOAD_MB`). Downloads are always sent as attachments, never shown inline. The portal's Fineract user has no access to bank or next-of-kin details (`dt_borrower_profile`) or to documents.
+- Loans can't be approved until the borrower's KYC documents are on file (`MCL_KYC_REQUIRED`, `MCL_KYC_REQUIRED_FOR_APPROVAL`).
 - Money is `Decimal` in Python and a decimal string in JSON and in the browser. No floating-point maths touches amounts.
 - Caddy sends a strict Content-Security-Policy and other security headers. The API sends `Cache-Control: no-store`. The service worker caches the app shell only, never API answers.
 - Run **one API worker**: SMS codes and rate limits live in memory. Move them to the database before running more than one.
 
 ## Checking against Fineract
 
-The Fineract back end is tested against recorded Fineract 1.15 response shapes (`api/tests/test_fineract_backend.py`). It has **not yet been run against a live Fineract server**. Before go-live:
-
-1. Start the full stack (`deploy/`), create a test client with a mobile number and `dt_borrower_financials` filled in, and a pending loan.
-2. Sign in to McLender as a credit manager: check the dashboard figures against the Mifos X reports (Active Loans, Portfolio at Risk).
-3. Approve, disburse and record a repayment; check the journal entries in Mifos X.
-4. Sign in to the portal with the test client's phone; check the loan, then apply and check the pending loan in Mifos X.
+The Fineract back end is tested against recorded Fineract response shapes (`api/tests/test_fineract_backend.py`) and is being checked against a live Fineract with [LIVE-TESTING.md](LIVE-TESTING.md).
 
 ## Decisions still open
 

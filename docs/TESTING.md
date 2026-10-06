@@ -32,6 +32,13 @@ Sample data is dated from today, so "due today" always has loans in it. Close an
 - [ ] "In arrears" lists Thomas Aisi (47 days, red), Lucy Gumuno (26) and Andrew Moka (12).
 - [ ] Entering more than is owed gives a clear error.
 
+**Borrowers and documents**
+- [ ] Borrowers lists 10 people; searching `2011 0488` finds Peter Wambi by his NID number.
+- [ ] New borrower: an empty save marks what's missing; someone under 18 is refused; a phone already in use is refused.
+- [ ] On the new profile, "4 documents needed". Upload any PDF or photo as the ID: it shows under Documents on file and downloads again.
+- [ ] Joyce Ilave's application can't be approved: it lists the bank statement and payroll deduction authority as missing.
+- [ ] After approving a loan, "Loan agreement (PDF)" opens a 3-page agreement marked DRAFT. Schedule, statement and receipts print too.
+
 **Permissions**
 - [ ] Sign out and sign in as `officer` / `officer`. Approving a loan gives "Only a credit manager can do this."
 

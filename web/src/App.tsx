@@ -6,6 +6,9 @@ import { Dashboard } from './staff/Dashboard'
 import { Applications } from './staff/Applications'
 import { LoanReview } from './staff/LoanReview'
 import { Repayments } from './staff/Repayments'
+import { Borrowers } from './staff/Borrowers'
+import { EditBorrower, NewBorrower } from './staff/BorrowerForm'
+import { BorrowerProfile } from './staff/BorrowerProfile'
 import { Skeleton } from './components'
 
 // The borrower portal is a separate bundle so phones on slow networks don't download the staff app.
@@ -23,6 +26,10 @@ export function App() {
         <Route path="applications" element={<Applications />} />
         <Route path="loans/:id" element={<LoanReview />} />
         <Route path="repayments" element={<Repayments />} />
+        <Route path="borrowers" element={<Borrowers />} />
+        <Route path="borrowers/new" element={<NewBorrower />} />
+        <Route path="borrowers/:id" element={<BorrowerProfile />} />
+        <Route path="borrowers/:id/edit" element={<EditBorrower />} />
       </Route>
       <Route path="/portal/*" element={
         <Suspense fallback={<div className="p-4"><Skeleton h={120} /></div>}>

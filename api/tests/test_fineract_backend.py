@@ -119,7 +119,26 @@ def test_get_loan_maps_everything(fb):
         ],
     )
     respx.get(f"{BASE}/datatables/dt_loan_assessment/536").respond(200, json=[])
+    respx.get(f"{BASE}/datatables/dt_borrower_profile/8").respond(
+        200,
+        json=[
+            {
+                "address": "Gerehu Stage 2",
+                "employer": "Lae Port Services Ltd",
+                "payroll_number": "LPS-0451",
+                "bank_name": "Kina Bank",
+                "bank_account_name": "Peter Wambi",
+                "bank_account_number": "2003 1188 0091",
+                "nok_name": "Rose Wambi",
+                "nok_relationship": "Wife",
+                "nok_phone": "71440023",
+            }
+        ],
+    )
     d = run(fb.get_loan("KEY", 536, TODAY))
+    assert d.borrower.employer == "Lae Port Services Ltd" and d.borrower.payroll_number == "LPS-0451"
+    assert d.borrower.bank and d.borrower.bank.bank == "Kina Bank"
+    assert d.borrower.next_of_kin and d.borrower.next_of_kin.name == "Rose Wambi"
     assert d.ref == "LN-000000536" and d.state == "PENDING" and d.borrower.phone == "71234567"
     assert d.borrower.monthly_income == D("4000") and d.borrower.credit_score == 700
     assert d.schedule[0].total == D("1418.39") and d.assessment is None
@@ -210,3 +229,125 @@ def test_console_sms_masks_outside_demo(caplog):
     with caplog.at_level("INFO", logger="mclender.sms"):
         run(ConsoleSms(reveal=False).send("70123344", "Your code is 123456"))
     assert "123456" not in caplog.text and "70123344" not in caplog.text and "*****344" in caplog.text
+
+
+@respx.mock
+def test_create_borrower_writes_client_identifier_and_tables(fb):
+    from app.domain.models import BorrowerIn
+
+    respx.get(f"{BASE}/codes").respond(
+        200, json=[{"id": 4, "name": "Gender"}, {"id": 1, "name": "Customer Identifier"}]
+    )
+    respx.get(f"{BASE}/codes/4/codevalues").respond(
+        200, json=[{"id": 21, "name": "Female"}, {"id": 22, "name": "Male"}]
+    )
+    respx.get(f"{BASE}/codes/1/codevalues").respond(200, json=[{"id": 31, "name": "National ID (NID)"}])
+    client = respx.post(f"{BASE}/clients").respond(200, json={"clientId": 77, "resourceId": 77})
+    ident = respx.post(f"{BASE}/clients/77/identifiers").respond(200, json={"resourceId": 5})
+    respx.get(f"{BASE}/datatables/dt_borrower_profile/77").respond(200, json=[])
+    profile = respx.post(f"{BASE}/datatables/dt_borrower_profile/77").respond(200, json={})
+    respx.get(f"{BASE}/datatables/dt_borrower_financials/77").respond(200, json=[])
+    fin = respx.post(f"{BASE}/datatables/dt_borrower_financials/77").respond(200, json={})
+    respx.get(f"{BASE}/clients/77").respond(
+        200, json={"id": 77, "displayName": "Kila Morea", "mobileNo": "75551212", "gender": {"name": "Female"}}
+    )
+    respx.get(f"{BASE}/clients/77/identifiers").respond(
+        200, json=[{"documentType": {"id": 31, "name": "National ID (NID)"}, "documentKey": "2018 4410 9921"}]
+    )
+    body = BorrowerIn(
+        first_name="Kila",
+        last_name="Morea",
+        phone="+675 7555 1212",
+        date_of_birth=date(1990, 4, 12),
+        gender="female",
+        address="Tokarara",
+        national_id="2018 4410 9921",
+        employer="Dept of Education",
+        payroll_number="DOE-55120",
+        monthly_income=D("3800"),
+    )
+    b = run(fb.create_borrower("K", body, TODAY))
+    sent = json.loads(client.calls[0].request.content)
+    assert sent["mobileNo"] == "75551212" and sent["genderId"] == 21 and sent["dateOfBirth"] == "1990-04-12"
+    assert sent["activationDate"] == "2026-10-06" and sent["legalFormId"] == 1
+    assert json.loads(ident.calls[0].request.content)["documentTypeId"] == 31
+    assert json.loads(profile.calls[0].request.content)["payroll_number"] == "DOE-55120"
+    assert json.loads(fin.calls[0].request.content)["monthly_income"] == "3800"
+    assert b.national_id == "2018 4410 9921" and b.gender == "female"
+
+
+@respx.mock
+def test_missing_nid_type_explains_the_fix(fb):
+    from app.domain.models import BorrowerIn
+
+    respx.get(f"{BASE}/codes").respond(200, json=[{"id": 1, "name": "Customer Identifier"}])
+    respx.get(f"{BASE}/codes/1/codevalues").respond(200, json=[{"id": 30, "name": "Passport"}])
+    respx.post(f"{BASE}/clients").respond(200, json={"clientId": 78})
+    body = BorrowerIn(
+        first_name="A",
+        last_name="B",
+        phone="75550000",
+        date_of_birth=date(1990, 1, 1),
+        gender="male",
+        address="Hohola",
+        national_id="1234 5678",
+    )
+    with pytest.raises(BackendError) as e:
+        run(fb.create_borrower("K", body, TODAY))
+    assert "number 78" in e.value.message and "National ID" in e.value.message
+
+
+@respx.mock
+def test_documents_upload_list_download(fb):
+    up = respx.post(f"{BASE}/clients/8/documents").respond(200, json={"resourceId": 41})
+    d = run(fb.add_document("K", 8, "payslip", "slip.pdf", "application/pdf", b"%PDF-1.4", TODAY))
+    req = up.calls[0].request
+    assert d.id == 41 and b'name="name"\r\n\r\npayslip' in req.content and b'filename="slip.pdf"' in req.content
+    respx.get(f"{BASE}/clients/8/documents").respond(
+        200,
+        json=[
+            {
+                "id": 41,
+                "name": "payslip",
+                "fileName": "slip.pdf",
+                "size": 8,
+                "type": "application/pdf",
+                "description": "McLender upload 2026-10-06",
+            },
+            {"id": 7, "name": "Old scan", "fileName": "x.jpg", "size": 3, "type": "image/jpeg"},
+        ],
+    )
+    docs = run(fb.list_documents("K", 8))
+    assert [(x.id, x.kind) for x in docs] == [(41, "payslip"), (7, "other")] and docs[0].uploaded_on == TODAY
+    respx.get(f"{BASE}/clients/8/documents/41").respond(
+        200, json={"id": 41, "name": "payslip", "fileName": "slip.pdf", "type": "application/pdf"}
+    )
+    respx.get(f"{BASE}/clients/8/documents/41/attachment").respond(200, content=b"%PDF-1.4")
+    meta, data = run(fb.get_document("K", 8, 41))
+    assert data == b"%PDF-1.4" and meta.file_name == "slip.pdf"
+
+
+@respx.mock
+def test_search_merges_client_and_identifier_hits(fb):
+    respx.get(f"{BASE}/search").respond(
+        200,
+        json=[
+            {"entityId": 8, "entityType": "CLIENT", "entityName": "Peter Wambi", "entityMobileNo": "71234567"},
+            {
+                "entityId": 3,
+                "entityType": "CLIENTIDENTIFIER",
+                "entityName": "2011 0488 7712",
+                "parentId": 8,
+                "parentName": "Peter Wambi",
+            },
+            {
+                "entityId": 4,
+                "entityType": "CLIENTIDENTIFIER",
+                "entityName": "2009 1182",
+                "parentId": 1,
+                "parentName": "Mary Kila",
+            },
+        ],
+    )
+    hits = run(fb.search_borrowers("K", "wambi"))
+    assert [(h.id, h.name) for h in hits] == [(8, "Peter Wambi"), (1, "Mary Kila")]

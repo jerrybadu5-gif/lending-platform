@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # "demo" runs on built-in sample data (no Fineract needed); "fineract" talks to a real server.
     backend: Literal["demo", "fineract"] = "demo"
     company_name: str = "Breez Lending"
+    # Printed on loan agreements, statements and receipts.
+    company_address: str = "Port Moresby, National Capital District, Papua New Guinea"
+    company_phone: str = ""
+    company_email: str = ""
     timezone: str = "Pacific/Port_Moresby"
 
     fineract_url: str = "http://localhost:8080"
@@ -52,6 +56,18 @@ class Settings(BaseSettings):
     dev_sms_inbox: bool = False
 
     policy_file: str = ""  # path to underwriting policy.json; empty = built-in defaults
+
+    # KYC: documents needed (by kind, minimum number of files) before a loan can be approved.
+    # A borrower's three payslips may be one scanned file, so one payslip file counts.
+    kyc_required: dict[str, int] = Field(
+        default_factory=lambda: {"id": 1, "payslip": 1, "bank_statement": 1, "deduction_authority": 1}
+    )
+    kyc_required_for_approval: bool = True
+    max_upload_mb: int = 10
+
+    # The loan agreement is a draft template until a PNG lawyer has reviewed the wording. While this is
+    # false, every page says so.
+    agreement_reviewed: bool = False
 
 
 @lru_cache

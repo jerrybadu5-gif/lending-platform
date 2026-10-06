@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, type CollectionItem, type PaymentMethod, type Receipt } from '../api/client'
+import { api, files, type CollectionItem, type PaymentMethod, type Receipt } from '../api/client'
 import { Button, DataTable, ErrorNote, Field, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
 
@@ -101,6 +101,9 @@ function RecordForm({ item, today }: { item: CollectionItem; today: string }) {
           <dt className="text-ink-muted">Loan</dt><dd className="m-0 ml-ref">{receipt.ref}</dd>
           <dt className="text-ink-muted">SMS receipt</dt><dd className="m-0">{receipt.sms_sent_to ? `Sent to ${receipt.sms_sent_to}` : 'No phone on file'}</dd>
         </dl>
+        {receipt.payment_id != null && (
+          <a href={files.receipt(receipt.loan_id, receipt.payment_id)} download className="ml-btn ml-btn-sm self-start no-underline">Print receipt (PDF)</a>
+        )}
       </div>
     )
   }

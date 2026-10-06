@@ -89,14 +89,32 @@ Tick each one. If something is wrong, note the screen, what you did and what you
 - [ ] Dashboard: 1 active loan (Mary), 2 waiting for approval (Peter, Joyce). Mary is about 10 days overdue,
       so she shows under arrears.
 - [ ] Open Peter Wambi's application: "Run check again" gives a recommendation and the figures.
-- [ ] Approve Peter for a smaller amount, then record disbursement. He becomes Active with a schedule.
+- [ ] Approve is greyed out, with "Documents still needed before approval". Follow the link to his profile
+      and upload the four documents (any PDF or phone photo will do for a test). The badge turns to
+      "Documents complete".
+- [ ] Back on his application, approve Peter for a smaller amount. "Loan agreement (PDF)" appears under
+      Print: open it and check the amount, his details and the DRAFT note. Then record disbursement.
+      He becomes Active with a schedule.
 - [ ] Reject Joyce with a note. She leaves the list.
-- [ ] Repayments: record K 472.80 for Mary by Mobile Money with a reference. A receipt shows.
+- [ ] Repayments: record K 472.80 for Mary by Mobile Money with a reference. A receipt shows;
+      "Print receipt (PDF)" opens it.
+
+**Borrowers as `grace`**
+- [ ] Borrowers > New borrower: saving an empty form marks what's missing; a date of birth under 18 is refused.
+- [ ] Sign up a new borrower with an NID number and a bank account. The profile shows "4 documents needed".
+- [ ] Signing up another borrower with the same phone or NID number is refused, naming who has it.
+- [ ] Upload a document, then download it from "Documents on file": it's the same file.
+- [ ] Take a loan application on the profile. It opens with the affordability check done.
+- [ ] Search finds the borrower by name, phone and NID number.
 
 **Compare in Mifos X** (http://localhost:8081)
 - [ ] Clients > Peter Wambi: the loan is Active with the approved amount and the same schedule.
 - [ ] Clients > Joyce Ilave: the loan is Rejected, with your note.
 - [ ] Clients > Mary Kila > loan > Transactions: your repayment, Mobile Money, your reference.
+- [ ] Clients > your new borrower: identifier "National ID (NID)", the uploaded documents under Documents,
+      and the profile under the dt_borrower_profile tab.
+- [ ] Uploaded documents survive a restart: `docker compose up -d --force-recreate fineract-server`, wait for UP,
+      then download one again in McLender.
 - [ ] The McLender dashboard figures match what Mifos X shows (active loans, outstanding, overdue).
 
 **Staff app as `john`**
@@ -104,6 +122,7 @@ Tick each one. If something is wrong, note the screen, what you did and what you
 
 **Portal**
 - [ ] Phone `7012 3344`, code from the log: Mary's loan shows what's left, the next payment and her payments.
+- [ ] "Download statement (PDF)" and "Repayment schedule (PDF)" open her own documents.
 - [ ] Apply for K 3,000 over 12 months. It appears for `grace` under Applications, and in Mifos X under Mary.
 - [ ] Phone `7999 9999` (unknown) gets the same "we have sent a code" message, and no code in the log.
 

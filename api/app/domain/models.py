@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 LoanState = Literal[
     "PENDING", "APPROVED", "REJECTED", "ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED", "WRITTEN_OFF", "WITHDRAWN"
@@ -14,12 +14,35 @@ LoanState = Literal[
 Recommendation = Literal["APPROVE", "REFER", "DECLINE"]
 InterestMethod = Literal["DECLINING_BALANCE", "FLAT"]
 PaymentMethod = Literal["cash", "bank", "mobile", "payroll"]
+Gender = Literal["female", "male"]
+DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other"]
+
+DOCUMENT_LABELS: dict[str, str] = {
+    "id": "ID (NID card, passport or driver's licence)",
+    "payslip": "Latest 3 payslips",
+    "bank_statement": "Bank statement (last 3 months)",
+    "deduction_authority": "Payroll deduction authority (signed)",
+    "other": "Other document",
+}
 
 
 class StaffUser(BaseModel):
     username: str
     display_name: str
     roles: list[str] = []
+
+
+class NextOfKin(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    relationship: str = Field(min_length=2, max_length=40)
+    phone: str = Field(min_length=7, max_length=20)
+
+
+class BankAccount(BaseModel):
+    bank: str = Field(min_length=2, max_length=60)
+    branch: str | None = Field(default=None, max_length=60)
+    account_name: str = Field(min_length=2, max_length=100)
+    account_number: str = Field(pattern=r"^[0-9 -]{4,30}$")
 
 
 class Borrower(BaseModel):
@@ -29,6 +52,11 @@ class Borrower(BaseModel):
     national_id: str | None = None
     employer: str | None = None
     address: str | None = None
+    date_of_birth: date | None = None
+    gender: Gender | None = None
+    payroll_number: str | None = None
+    bank: BankAccount | None = None
+    next_of_kin: NextOfKin | None = None
     monthly_income: Decimal | None = None
     existing_monthly_debt: Decimal | None = None
     credit_score: int | None = None
@@ -81,9 +109,11 @@ class LoanSummary(BaseModel):
 
 
 class Payment(BaseModel):
+    id: int | None = None  # Fineract transaction id; used to print a receipt again
     paid_on: date
     amount: Decimal
     method: str
+    reference: str | None = None
 
 
 class LoanEvent(BaseModel):
@@ -163,12 +193,92 @@ class Receipt(BaseModel):
     reference: str
     received_on: date
     sms_sent_to: str | None = None
+    payment_id: int | None = None  # for printing the receipt as a PDF
 
 
 class ActionResult(BaseModel):
     loan_id: int
     state: LoanState
     message: str
+
+
+# --- Borrowers and KYC --------------------------------------------------------
+
+
+class BorrowerIn(BaseModel):
+    """A new borrower, or changes to one. Staff enter this when signing someone up."""
+
+    first_name: str = Field(min_length=1, max_length=50)
+    last_name: str = Field(min_length=1, max_length=50)
+    phone: str = Field(min_length=7, max_length=20)
+    date_of_birth: date
+    gender: Gender
+    address: str = Field(min_length=3, max_length=200)
+    national_id: str | None = Field(default=None, pattern=r"^[0-9A-Za-z -]{4,30}$")
+    employer: str | None = Field(default=None, max_length=100)
+    payroll_number: str | None = Field(default=None, max_length=30)
+    monthly_income: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+    existing_monthly_debt: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
+    bank: BankAccount | None = None
+    next_of_kin: NextOfKin | None = None
+
+    @field_validator("first_name", "last_name", "address", "employer", "payroll_number", "national_id")
+    @classmethod
+    def _strip(cls, v: str | None) -> str | None:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _adult(cls, v: date) -> date:
+        today = date.today()
+        age = today.year - v.year - ((today.month, today.day) < (v.month, v.day))
+        if age < 18:
+            raise ValueError("Borrowers must be 18 or older.")
+        if age > 100:
+            raise ValueError("Check the date of birth.")
+        return v
+
+    @property
+    def name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+
+
+class BorrowerDocument(BaseModel):
+    id: int
+    kind: DocumentKind
+    file_name: str
+    content_type: str
+    size: int
+    uploaded_on: date | None = None
+
+
+class KycStatus(BaseModel):
+    complete: bool
+    missing: list[str] = []  # labels of the document kinds still needed
+    have: dict[str, int] = {}  # documents on file, by kind
+
+
+class BorrowerListItem(BaseModel):
+    id: int
+    name: str
+    phone: str | None = None
+    national_id: str | None = None
+    employer: str | None = None
+
+
+class BorrowerProfile(BaseModel):
+    borrower: Borrower
+    documents: list[BorrowerDocument]
+    kyc: KycStatus
+    loans: list[LoanSummary]
+
+
+class ApplicationIn(BaseModel):
+    """A loan application staff take for a borrower."""
+
+    amount: Decimal = Field(ge=200, le=50000, max_digits=14, decimal_places=2)
+    months: int = Field(ge=1, le=36)
+    purpose: str = Field(default="", max_length=200)
 
 
 # --- Borrower portal ---------------------------------------------------------

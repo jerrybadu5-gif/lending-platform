@@ -41,16 +41,20 @@ PAYMENT_TYPES = [("Cash", True), ("Bank Transfer", False), ("Mobile Money", Fals
 
 DT = [bootstrap.BORROWER_TABLE, bootstrap.ASSESSMENT_TABLE]
 DT_RW = [f"{op}_{t}" for t in DT for op in ("READ", "CREATE", "UPDATE")]
+# Staff also keep the borrower profile (bank account, next of kin) and KYC documents. The portal does not.
+STAFF_KYC = [f"{op}_{bootstrap.PROFILE_TABLE}" for op in ("READ", "CREATE", "UPDATE")] + [
+    "CREATE_DOCUMENT", "READ_DOCUMENT", "CREATE_CLIENTIDENTIFIER", "UPDATE_CLIENTIDENTIFIER",
+]
 ROLES = {
     "Credit Manager": (
         "Approves, rejects and disburses loans (McLender: approver)",
         ["ALL_FUNCTIONS_READ", "CREATE_CLIENT", "ACTIVATE_CLIENT", "UPDATE_CLIENT", "CREATE_LOAN", "UPDATE_LOAN",
-         "APPROVE_LOAN", "REJECT_LOAN", "DISBURSE_LOAN", "REPAYMENT_LOAN", *DT_RW],
+         "APPROVE_LOAN", "REJECT_LOAN", "DISBURSE_LOAN", "REPAYMENT_LOAN", *DT_RW, *STAFF_KYC],
     ),
     "Loan Officer": (
         "Takes applications and records repayments; cannot approve",
         ["ALL_FUNCTIONS_READ", "CREATE_CLIENT", "ACTIVATE_CLIENT", "UPDATE_CLIENT", "CREATE_LOAN", "UPDATE_LOAN",
-         "REPAYMENT_LOAN", *DT_RW],
+         "REPAYMENT_LOAN", *DT_RW, *STAFF_KYC],
     ),
     "Borrower Portal": (
         "Technical user behind the McLender borrower portal",
@@ -201,6 +205,9 @@ def main() -> None:
         f.upsert_datatable_row(bootstrap.BORROWER_TABLE, cid, {
             "monthly_income": income, "existing_monthly_debt": debt, "credit_score": score,
             "income_verified": True, "income_source": "Salary",
+        })
+        f.upsert_datatable_row(bootstrap.PROFILE_TABLE, cid, {
+            "address": "Waigani, NCD", "employer": "Test employer", "payroll_number": f"T-{phone[-4:]}",
         })
         print(f"+ {first} {last}, phone {phone}")
         return cid
