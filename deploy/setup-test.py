@@ -20,6 +20,7 @@ TEST DATA ONLY. Do not run this against the live Breez Lending server.
 """
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 from datetime import date, timedelta
@@ -76,8 +77,9 @@ def items(res):
 
 
 def main() -> None:
-    f = Fineract.from_env()
     env = read_env()
+    os.environ.setdefault("FINERACT_URL", f"http://localhost:{env.get('FINERACT_PORT', '8080')}")
+    f = Fineract.from_env()
     try:
         f.get("/offices")
     except FineractError as e:
