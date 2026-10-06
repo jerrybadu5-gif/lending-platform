@@ -40,13 +40,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logging.getLogger("mclender").warning(
             "MCL_COOKIE_SECURE is off: sign-in cookies will also travel over plain HTTP. Turn it on behind HTTPS."
         )
+    if settings.backend == "fineract" and settings.sms_provider == "console":
+        logging.getLogger("mclender").warning(
+            "No SMS provider: borrowers will not receive sign-in codes or receipts. %s",
+            "Codes are written to this log (MCL_SMS_LOG_CONTENT=true): local testing only."
+            if settings.sms_log_content
+            else "For local testing only, set MCL_SMS_LOG_CONTENT=true to read codes from this log.",
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         svc = Services(
             settings=settings,
             backend=None,  # type: ignore[arg-type]  # set just below, once today's date is known
-            sms=make_sms(settings.sms_provider, reveal=settings.backend == "demo"),
+            sms=make_sms(settings.sms_provider, reveal=settings.backend == "demo" or settings.sms_log_content),
             otp=OtpStore(settings.otp_ttl_seconds, settings.otp_max_attempts),
             policy=load_policy(settings.policy_file),
             login_limit=RateLimiter(10, 300),

@@ -21,6 +21,13 @@ describe('api client', () => {
     await expect(api.staff.me()).rejects.toBeInstanceOf(ApiError)
   })
 
+  it('keeps the status when an error body is JSON null', async () => {
+    reply(401, 'null')
+    const err = await api.staff.me().catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(401)
+  })
+
   it('gives a plain message when an error body is not JSON', async () => {
     reply(502, 'Bad gateway')
     await expect(api.staff.me()).rejects.toThrow('Something went wrong. Try again.')

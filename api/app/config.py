@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     session_secret: str = "dev-only-change-me"
     session_hours: int = 10
     cookie_secure: bool = False
+    # Write SMS text (including sign-in codes) to the log. Sample data always does; with Fineract only
+    # for local testing until a real SMS provider is set up.
+    sms_log_content: bool = False
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     # SMS: "console" logs messages (development). Digicel and Vodafone adapters are chosen at shipping time.

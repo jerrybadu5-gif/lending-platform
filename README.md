@@ -50,6 +50,9 @@ Sample data resets every time the API restarts.
 
 ## Run it for real (with Fineract)
 
+**Testing on one PC first:** follow [docs/LIVE-TESTING.md](docs/LIVE-TESTING.md). A script sets up Fineract with test users, a loan product and borrowers.
+
+
 1. Follow [deploy/](deploy/) and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) to start Fineract and set up the products, chart of accounts and payment types (`Cash`, `Bank Transfer`, `Mobile Money`, `Payroll Deduction`).
 2. Run `python underwriting/bootstrap.py --gate` once to create the data tables McLender uses.
 3. In Mifos X, create a user `portal` with a role that has only: read client, read client identifier, read loan, read loan product, create loan, and read/create/update on the two data tables (the list is at the top of `api/app/backends/fineract.py`).

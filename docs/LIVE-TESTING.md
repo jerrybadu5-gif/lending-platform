@@ -1,0 +1,127 @@
+# Live testing: McLender with a real Fineract (Docker Desktop, Windows)
+
+This runs the whole system on one PC: PostgreSQL, Apache Fineract, the Mifos X admin app and McLender.
+It uses **test data only**. Allow 30–45 minutes the first time; most of it is downloading and Fineract's
+first start.
+
+You need Docker Desktop running (whale icon in the taskbar steady, not animating) and about 8 GB of
+memory free. All commands are for PowerShell in VS Code (**Terminal > New Terminal**), starting in the
+`lending-platform` folder.
+
+## 1. Settings file
+
+```powershell
+Copy-Item deploy\.env.example deploy\.env
+python -c "import secrets;print(secrets.token_urlsafe(48))"
+```
+
+Open `deploy\.env` in VS Code and change these lines (any long passwords you like; it's a test):
+
+| Line | Set to |
+|---|---|
+| `POSTGRES_PASSWORD` | a password |
+| `FINERACT_DB_PASS` | a different password |
+| `MCL_SESSION_SECRET` | the long random text the `python` line printed |
+| `MCL_FINERACT_PORTAL_PASSWORD` | another password (8+ characters) |
+| `MCL_SMS_LOG_CONTENT` | `true` (test PC only: puts sign-in codes in the log, as there's no SMS provider yet) |
+
+Save the file. It's ignored by git, so the passwords never go to GitHub.
+
+## 2. Start the database and Fineract
+
+```powershell
+cd deploy
+docker compose up -d postgresql fineract-server
+```
+
+The first time this downloads about 1 GB. Then Fineract sets up its database, which takes 3–10 minutes.
+Check whether it's ready (repeat every minute or so):
+
+```powershell
+curl.exe -s http://localhost:8080/fineract-provider/actuator/health
+```
+
+It's ready when this shows `{"status":"UP"...}`. To watch it start: `docker compose logs -f fineract-server`
+(Ctrl+C stops watching, not Fineract).
+
+## 3. Load the test setup
+
+```powershell
+cd ..
+api\.venv\Scripts\python.exe deploy\setup-test.py
+```
+
+This creates the data tables, PGK, payment types, a Personal loan product, the roles, the users `grace`
+(credit manager), `john` (loan officer) and `portal`, and three test borrowers. **Write down the logins
+it prints at the end; they're shown once.** If it stops with "Fineract refused a step", copy the message to
+Claude. It's safe to run again after a fix.
+
+If it says to set `MCL_PORTAL_PRODUCT_ID`, change that line in `deploy\.env`.
+
+## 4. Start McLender and the Mifos X admin app
+
+```powershell
+cd deploy
+docker compose up -d --build
+docker compose ps
+```
+
+The first build takes a few minutes. All five services should show `running` (or `healthy`).
+
+| Open | Sign in |
+|---|---|
+| McLender staff app: http://localhost:8088/staff | `grace` or `john`, with the passwords from step 3 |
+| McLender portal: http://localhost:8088/portal | phone `7012 3344` (Mary Kila) |
+| Mifos X admin: http://localhost:8081 | `mifos` / `password` (Fineract's built-in admin) |
+
+Portal sign-in code (the newest line is the one to use):
+
+```powershell
+docker compose logs mclender-api | Select-String "sign-in code"
+```
+
+## 5. What to check
+
+Tick each one. If something is wrong, note the screen, what you did and what you expected.
+
+**Staff app as `grace`**
+- [ ] Sign-in shows Grace's name and the Credit manager role.
+- [ ] Dashboard: 1 active loan (Mary), 2 waiting for approval (Peter, Joyce). Mary is about 10 days overdue,
+      so she shows under arrears.
+- [ ] Open Peter Wambi's application: "Run check again" gives a recommendation and the figures.
+- [ ] Approve Peter for a smaller amount, then record disbursement. He becomes Active with a schedule.
+- [ ] Reject Joyce with a note. She leaves the list.
+- [ ] Repayments: record K 472.80 for Mary by Mobile Money with a reference. A receipt shows.
+
+**Compare in Mifos X** (http://localhost:8081)
+- [ ] Clients > Peter Wambi: the loan is Active with the approved amount and the same schedule.
+- [ ] Clients > Joyce Ilave: the loan is Rejected, with your note.
+- [ ] Clients > Mary Kila > loan > Transactions: your repayment, Mobile Money, your reference.
+- [ ] The McLender dashboard figures match what Mifos X shows (active loans, outstanding, overdue).
+
+**Staff app as `john`**
+- [ ] Approving a loan says "Only a credit manager can do this."
+
+**Portal**
+- [ ] Phone `7012 3344`, code from the log: Mary's loan shows what's left, the next payment and her payments.
+- [ ] Apply for K 3,000 over 12 months. It appears for `grace` under Applications, and in Mifos X under Mary.
+- [ ] Phone `7999 9999` (unknown) gets the same "we have sent a code" message, and no code in the log.
+
+## Stopping, restarting, starting over
+
+```powershell
+docker compose stop          # stop everything; data kept
+docker compose start         # start again (Fineract takes a minute)
+docker compose down -v       # DELETE all test data and start from step 2
+```
+
+## If something goes wrong
+
+| Problem | Try |
+|---|---|
+| `port is already allocated` | Another program uses that port. Change `FINERACT_PORT`, `WEB_APP_PORT` or `MCLENDER_PORT` in `.env` |
+| Health check never says UP | `docker compose logs fineract-server --tail 50`; often memory: give Docker more in Docker Desktop > Settings > Resources |
+| McLender says it can't reach Fineract | `docker compose logs mclender-api --tail 50` |
+| Sign-in to the portal says nothing was found | Re-run step 3, then check Mary's mobile number in Mifos X is 70123344 |
+
+Copy any error to Claude as text, with the command you ran.
