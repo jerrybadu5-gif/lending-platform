@@ -21,6 +21,7 @@ TABLES = [
     {
         "datatableName": BORROWER_TABLE,
         "apptableName": "m_client",
+        "entitySubType": "PERSON",  # required by Fineract 1.10+ for client tables
         "multiRow": False,
         "columns": [
             {"name": "monthly_income", "type": "decimal", "mandatory": True},
