@@ -1,0 +1,13 @@
+{
+  "version": "2026-10",
+  "max_dti": "0.40",
+  "refer_dti_band": "0.05",
+  "min_credit_score": 600,
+  "refer_credit_band": 30,
+  "min_dscr": "1.25",
+  "dti_best": "0.20",
+  "dti_worst": "0.60",
+  "credit_floor": 300,
+  "credit_ceiling": 850,
+  "credit_weight": "0.5"
+}

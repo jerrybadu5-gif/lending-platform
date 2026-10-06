@@ -1,0 +1,138 @@
+from decimal import Decimal as D
+
+
+def test_health(client):
+    assert client.get("/api/health").json() == {"status": "ok", "backend": "demo"}
+
+
+def test_requires_login(client):
+    assert client.get("/api/staff/dashboard").status_code == 401
+
+
+def test_wrong_password(client):
+    r = client.post("/api/staff/login", json={"username": "demo", "password": "nope"})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Username or password is wrong."
+
+
+def test_session_cookie_is_httponly_and_strict(client):
+    r = client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=strict" in cookie
+    assert "demo:demo" not in r.headers["set-cookie"]  # credential is signed, not exposed raw... nor readable by JS
+
+
+def test_tampered_cookie_rejected(client):
+    client.cookies.set("mcl_staff", "garbage.value.sig")
+    assert client.get("/api/staff/me").status_code == 401
+
+
+def test_dashboard_figures_add_up(staff):
+    d = staff.get("/api/staff/dashboard").json()
+    assert d["active_loans"] == 8
+    assert d["pending_count"] == 5
+    assert d["due_today_count"] == 3  # Mary, Samuel, Ruth
+    assert D(d["due_today_amount"]) > 0
+    buckets = {b["label"]: b["loans"] for b in d["arrears_buckets"]}
+    assert buckets == {"1–30 days": 2, "31–60 days": 1, "61–90 days": 0, "Over 90 days": 0}
+    assert D(d["arrears_total"]) == sum(D(b["amount"]) for b in d["arrears_buckets"])
+    assert D("0") < D(d["par30_ratio"]) < D("1")
+    assert staff.get("/api/staff/loans").headers["cache-control"] == "no-store"
+
+
+def test_pending_loan_is_assessed_on_open(staff):
+    loans = staff.get("/api/staff/loans", params={"state": "PENDING"}).json()
+    assert {l["ref"] for l in loans} >= {"LN-000536", "LN-000542"}
+    d = staff.get("/api/staff/loans/536").json()
+    a = d["assessment"]
+    # Peter Wambi: K 15,000 at 24% over 12 months, income 4,000, debt 360 -> DTI 44.46%, REFER
+    assert a["recommendation"] == "REFER"
+    assert a["dti"] == "0.4446" and a["monthly_payment"] == "1418.39"
+    assert a["max_recommended_principal"] == "13113.42"
+    assert d["schedule"][0]["total"] == "1418.39"
+    assert any("Underwriting" in h["text"] for h in d["history"])
+
+
+def test_approve_disburse_flow(staff):
+    staff.get("/api/staff/loans/536")
+    r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00", "note": "Reduced to fit DTI"})
+    assert r.status_code == 200 and r.json()["state"] == "APPROVED"
+    assert staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00"}).status_code == 409
+    r = staff.post("/api/staff/loans/536/disburse")
+    assert r.json()["state"] == "ACTIVE"
+    d = staff.get("/api/staff/loans/536").json()
+    assert d["principal"] == "13000.00" and d["state"] == "ACTIVE" and d["next_due_date"]
+
+
+def test_cannot_approve_more_than_applied(staff):
+    r = staff.post("/api/staff/loans/533/approve", json={"amount": "9000"})
+    assert r.status_code == 422
+
+
+def test_loan_officer_cannot_approve(client):
+    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    r = client.post("/api/staff/loans/533/approve", json={"amount": "8000"})
+    assert r.status_code == 403
+
+
+def test_reject_needs_note_and_sends_sms(staff, sms):
+    assert staff.post("/api/staff/loans/542/reject", json={"note": ""}).status_code == 422
+    r = staff.post("/api/staff/loans/542/reject", json={"note": "DTI too high"})
+    assert r.json()["state"] == "REJECTED"
+    assert sms.sent[-1][0] == "74220876"
+
+
+def test_collections_views(staff):
+    today = staff.get("/api/staff/collections", params={"view": "today"}).json()
+    arrears = staff.get("/api/staff/collections", params={"view": "arrears"}).json()
+    assert {c["borrower_name"] for c in today} == {"Mary Kila", "Samuel Kiap", "Ruth Kaupa"}
+    assert [c["days_overdue"] for c in arrears] == [47, 26, 12]
+
+
+def test_record_repayment_and_receipt_sms(staff, sms):
+    mary = next(c for c in staff.get("/api/staff/collections").json() if c["borrower_name"] == "Mary Kila")
+    assert mary["amount_due"] == "1318.74"
+    d = staff.get("/api/health")  # noqa: F841
+    r = staff.post(
+        f"/api/staff/loans/{mary['loan_id']}/repayments",
+        json={
+            "amount": "1318.74",
+            "method": "mobile",
+            "reference": "CM8841203377",
+            "received_on": staff.get("/api/staff/dashboard").json()["as_of"],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["receipt_no"].startswith("RC-")
+    assert "K 1,318.74" in sms.sent[-1][1]
+    names = {c["borrower_name"] for c in staff.get("/api/staff/collections", params={"view": "today"}).json()}
+    assert "Mary Kila" not in names
+
+
+def test_repayment_validation(staff):
+    today = staff.get("/api/staff/dashboard").json()["as_of"]
+    r = staff.post(
+        "/api/staff/loans/482/repayments",
+        json={"amount": "999999", "method": "cash", "reference": "0041", "received_on": today},
+    )
+    assert r.status_code == 422 and "still owed" in r.json()["detail"]
+    r = staff.post(
+        "/api/staff/loans/482/repayments",
+        json={"amount": "-5", "method": "cash", "reference": "0041", "received_on": today},
+    )
+    assert r.status_code == 422 and r.json()["fields"][0]["field"] == "amount"
+    r = staff.post(
+        "/api/staff/loans/533/repayments",
+        json={"amount": "5", "method": "cash", "reference": "0041", "received_on": today},
+    )
+    assert r.status_code == 409
+
+
+def test_unknown_loan(staff):
+    assert staff.get("/api/staff/loans/99999").status_code == 404
+
+
+def test_login_rate_limited(client):
+    for _ in range(10):
+        client.post("/api/staff/login", json={"username": "x", "password": "y"})
+    assert client.post("/api/staff/login", json={"username": "x", "password": "y"}).status_code == 429

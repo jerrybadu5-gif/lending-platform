@@ -1,0 +1,69 @@
+"""The interface every lending back end implements (Fineract in production, demo data in development)."""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Protocol
+
+from ..domain.models import (
+    ActionResult,
+    ApproveIn,
+    Assessment,
+    Borrower,
+    CollectionItem,
+    Dashboard,
+    LoanDetail,
+    LoanSummary,
+    PortalApplicationIn,
+    Receipt,
+    RejectIn,
+    RepaymentIn,
+    StaffUser,
+)
+
+
+class BackendError(Exception):
+    """A problem the user can act on. `status` maps to the HTTP status returned."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+class NotFound(BackendError):
+    def __init__(self, what: str):
+        super().__init__(f"{what} was not found.", 404)
+
+
+class AuthFailed(BackendError):
+    def __init__(self, message: str = "Username or password is wrong."):
+        super().__init__(message, 401)
+
+
+class LendingBackend(Protocol):
+    # Staff calls take `cred`: the signed-in staff member's Fineract credential (ignored by the demo).
+    async def authenticate(self, username: str, password: str) -> tuple[StaffUser, str]: ...
+    async def dashboard(self, cred: str, today: date) -> Dashboard: ...
+    async def list_loans(self, cred: str, today: date, states: set[str] | None = None) -> list[LoanSummary]: ...
+    async def get_loan(self, cred: str, loan_id: int, today: date) -> LoanDetail: ...
+    async def save_assessment(self, cred: str, loan_id: int, assessment: Assessment) -> None: ...
+    async def approve(self, cred: str, loan_id: int, body: ApproveIn, today: date) -> ActionResult: ...
+    async def reject(self, cred: str, loan_id: int, body: RejectIn, today: date) -> ActionResult: ...
+    async def disburse(self, cred: str, loan_id: int, today: date) -> ActionResult: ...
+    async def collections(self, cred: str, today: date) -> list[CollectionItem]: ...
+    async def record_repayment(self, cred: str, loan_id: int, body: RepaymentIn, today: date) -> Receipt: ...
+
+    # Borrower portal calls run as the portal's technical account.
+    async def find_borrower_by_phone(self, phone: str) -> Borrower | None: ...
+    async def borrower_loans(self, borrower_id: int, today: date) -> list[LoanDetail]: ...
+    async def submit_application(self, borrower_id: int, body: PortalApplicationIn, today: date) -> LoanSummary: ...
+    async def aclose(self) -> None: ...
+
+
+def normalise_phone(phone: str) -> str:
+    """PNG mobile numbers as 8 digits: '+675 7123 4567', '675-71234567', '7123 4567' -> '71234567'."""
+    digits = "".join(c for c in phone if c.isdigit())
+    if digits.startswith("675") and len(digits) == 11:
+        digits = digits[3:]
+    return digits

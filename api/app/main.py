@@ -1,0 +1,107 @@
+"""McLender API entry point: `uvicorn app.main:app`."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .backends.base import BackendError, LendingBackend
+from .config import Settings, get_settings
+from .deps import Services
+from .routers import portal, staff
+from .security import OtpStore, RateLimiter
+from .sms import make_sms
+from .underwriting import load_policy
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+
+def make_backend(settings: Settings, today) -> LendingBackend:
+    if settings.backend == "fineract":
+        from .backends.fineract import FineractBackend
+
+        return FineractBackend(settings)
+    from .backends.demo import DemoBackend
+
+    return DemoBackend(today)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    if settings.backend == "fineract" and settings.session_secret == "dev-only-change-me":
+        raise RuntimeError("Set MCL_SESSION_SECRET before using the Fineract back end.")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        svc = Services(
+            settings=settings,
+            backend=None,  # type: ignore[arg-type]  # set just below, once today's date is known
+            sms=make_sms(settings.sms_provider),
+            otp=OtpStore(settings.otp_ttl_seconds, settings.otp_max_attempts),
+            policy=load_policy(settings.policy_file),
+            login_limit=RateLimiter(10, 300),
+            otp_limit=RateLimiter(5, 900),
+        )
+        svc.backend = make_backend(settings, svc.today())
+        app.state.services = svc
+        yield
+        await svc.backend.aclose()
+
+    app = FastAPI(
+        title="McLender API",
+        version="0.1.0",
+        lifespan=lifespan,
+        description=f"Back end for the McLender staff app and the {settings.company_name} borrower portal.",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
+    @app.exception_handler(BackendError)
+    async def backend_error(_: Request, exc: BackendError):
+        return JSONResponse({"detail": exc.message}, status_code=exc.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError):
+        fields = []
+        for e in exc.errors():
+            loc = ".".join(str(p) for p in e["loc"] if p != "body")
+            fields.append({"field": loc, "message": e["msg"]})
+        return JSONResponse({"detail": "Some fields need fixing.", "fields": fields}, status_code=422)
+
+    @app.get("/api/health", tags=["system"])
+    async def health():
+        return {"status": "ok", "backend": settings.backend}
+
+    if settings.dev_sms_inbox and settings.backend == "demo":
+
+        @app.get("/api/dev/sms/{phone}", tags=["development"])
+        async def dev_sms(phone: str, request: Request):
+            sent = [m for m in request.app.state.services.sms.sent if m[0] == phone]
+            return {"to": phone, "text": sent[-1][1] if sent else None}
+
+    app.include_router(staff.router)
+    app.include_router(portal.router)
+    return app
+
+
+app = create_app()

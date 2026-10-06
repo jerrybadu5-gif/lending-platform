@@ -1,0 +1,26 @@
+# Secrets
+.env
+deploy/.env
+deploy/backups/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Node
+node_modules/
+web/dist/
+web/dev-dist/
+web/test-results/
+web/playwright-report/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
