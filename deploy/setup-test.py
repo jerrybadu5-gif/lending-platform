@@ -118,7 +118,8 @@ def main() -> None:
             "repaymentEvery": 1, "repaymentFrequencyType": 2,
             "interestRatePerPeriod": 24, "minInterestRatePerPeriod": 10, "maxInterestRatePerPeriod": 36,
             "interestRateFrequencyType": 3, "interestType": 0, "amortizationType": 1,
-            "interestCalculationPeriodType": 1, "allowPartialPeriodInterestCalcualtion": False,
+            "interestCalculationPeriodType": 1,
+            "repaymentStartDateType": 1, "loanScheduleType": "CUMULATIVE",  # first repayment counted from disbursement
             "transactionProcessingStrategyCode": "mifos-standard-strategy",
             "daysInMonthType": 1, "daysInYearType": 1, "isInterestRecalculationEnabled": False,
             "isLinkedToFloatingInterestRates": False, "isEqualAmortization": False,
