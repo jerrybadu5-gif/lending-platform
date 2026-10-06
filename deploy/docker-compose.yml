@@ -36,12 +36,24 @@ services:
       timeout: 5s
       retries: 10
 
+  # Docker creates the document volume owned by root, but Fineract runs as an ordinary user, so
+  # uploads failed with AccessDeniedException. This one-off step lets Fineract write there. The
+  # volume is only mounted into Fineract (and the backup), never published.
+  fineract-content-init:
+    image: alpine:3.20
+    command: ["sh", "-c", "chmod 0777 /data/fineract-content"]
+    volumes:
+      - fineract_content:/data/fineract-content
+    restart: "no"
+
   fineract-server:
     image: ${FINERACT_IMAGE:-apache/fineract:latest}
     restart: unless-stopped
     depends_on:
       postgresql:
         condition: service_healthy
+      fineract-content-init:
+        condition: service_completed_successfully
     ports:
       - "${FINERACT_BIND:-127.0.0.1}:${FINERACT_PORT:-8080}:8080"  # this PC only; McLender reaches it inside Docker
     environment:
