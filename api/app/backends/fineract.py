@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import re
 import time
 from datetime import date, timedelta
@@ -75,6 +76,7 @@ STATUS: dict[int, LoanState] = {
     700: "CLOSED",
 }
 LIVE = {"ACTIVE", "ARREARS", "ARREARS_LATE"}
+log = logging.getLogger("mclender.fineract")
 
 
 def fdate(v: Any) -> date | None:
@@ -158,10 +160,12 @@ class FineractBackend:
             raise BackendError(fineract_message(resp), 422 if resp.status_code < 500 else 502)
         return resp.json() if resp.content else None
 
-    async def _send(self, cred: str, method: str, path: str, **kw: Any) -> httpx.Response:
-        """A request whose body or answer isn't JSON (file upload or download)."""
+    async def _send(self, cred: str, method: str, path: str, accept: str = "*/*", **kw: Any) -> httpx.Response:
+        """A request whose body or answer isn't JSON (file upload or download). Fineract answers a file
+        download only as application/octet-stream, so the client's default Accept: application/json
+        would get 406 Not Acceptable."""
         async with self._sem:
-            resp = await self.http.request(method, path, headers=self._auth(cred), **kw)
+            resp = await self.http.request(method, path, headers={**self._auth(cred), "Accept": accept}, **kw)
         if resp.status_code == 401:
             raise BackendError("Your session with Fineract has ended. Please sign in again.", 401)
         if resp.status_code == 404:
@@ -240,10 +244,12 @@ class FineractBackend:
             return None
         return rows[0] if rows else None
 
-    async def _upsert(self, cred: str, table: str, entity_id: int, values: dict) -> None:
+    async def _upsert(self, cred: str, table: str, entity_id: int, values: dict, clear_empty: bool = False) -> None:
+        """Create or update a data table row. With clear_empty, None values are sent as null so a field
+        the user emptied is cleared in Fineract (otherwise None means "leave as it is")."""
         body = {
             **DATE_FMT,
-            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in values.items() if v is not None},
+            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in values.items() if v is not None or clear_empty},
         }
         if await self._datatable(cred, table, entity_id):
             await self._req(cred, "PUT", f"/datatables/{table}/{entity_id}", body)
@@ -353,6 +359,7 @@ class FineractBackend:
             next_due_amount=(nxt.total - nxt.paid) if nxt else None,
             interest_method="FLAT" if (raw.get("interestType") or {}).get("id") == 1 else "DECLINING_BALANCE",
             repayments_per_year=repayments_per_year(raw),
+            approved_on=fdate(tl.get("approvedOnDate")),
             borrower=borrower,
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),
@@ -726,16 +733,46 @@ class FineractBackend:
         values = await self._code_values(cred, "Gender")
         return next((v for k, v in values.items() if k.startswith(gender[0])), None)
 
+    async def _nid_type(self, cred: str) -> int:
+        types = await self._code_values(cred, "Customer Identifier")
+        type_id = next((v for k, v in types.items() if _is_nid(k)), None)
+        if type_id is None:
+            raise BackendError(
+                'Add a "National ID (NID)" value to the Customer Identifier code in Fineract '
+                "(Admin > System > Manage codes), then try again.",
+                422,
+            )
+        return type_id
+
+    async def _check_unique(self, cred: str, body: BorrowerIn, except_id: int | None = None) -> None:
+        """Refuse a phone number or NID that another borrower already has, naming them, before anything
+        is written (Fineract would otherwise create the client and then refuse the identifier)."""
+        phone = normalise_phone(body.phone)
+        hits = await self._get(cred, f"/search?query={quote(phone)}&resource=clients&exactMatch=false")
+        for h in hits or []:
+            cid = int(h.get("entityId") or 0)
+            if (h.get("entityType") or "").upper() != "CLIENT" or cid == except_id:
+                continue
+            client = await self._get(cred, f"/clients/{cid}")
+            if normalise_phone(client.get("mobileNo") or "") == phone:
+                raise BackendError(
+                    f"{client.get('displayName', 'Another borrower')} already has phone number {phone}.", 409
+                )
+        if body.national_id:
+            key = _nid_key(body.national_id)
+            hits = await self._get(
+                cred, f"/search?query={quote(body.national_id)}&resource=clientIdentifiers&exactMatch=false"
+            )
+            for h in hits or []:
+                owner = int(h.get("parentId") or 0)
+                if owner and owner != except_id and _nid_key(h.get("entityName") or "") == key:
+                    raise BackendError(
+                        f"{h.get('parentName', 'Another borrower')} already has NID number {body.national_id}.", 409
+                    )
+
     async def _save_details(self, cred: str, client_id: int, body: BorrowerIn, new: bool) -> None:
         if body.national_id:
-            types = await self._code_values(cred, "Customer Identifier")
-            type_id = next((v for k, v in types.items() if _is_nid(k)), None)
-            if type_id is None:
-                raise BackendError(
-                    'Add a "National ID (NID)" value to the Customer Identifier code in Fineract '
-                    "(Admin > System > Manage codes), then try again.",
-                    422,
-                )
+            type_id = await self._nid_type(cred)
             existing = [] if new else await self._get(cred, f"/clients/{client_id}/identifiers")
             current = next((i for i in existing if (i.get("documentType") or {}).get("id") == type_id), None)
             ident = {"documentTypeId": type_id, "documentKey": body.national_id, "status": "Active"}
@@ -760,6 +797,7 @@ class FineractBackend:
                 "nok_relationship": nok.relationship if nok else None,
                 "nok_phone": normalise_phone(nok.phone) if nok else None,
             },
+            clear_empty=True,  # removing a bank account or next of kin in McLender must remove it here too
         )
         if body.monthly_income is not None:
             await self._upsert(
@@ -774,6 +812,9 @@ class FineractBackend:
             )
 
     async def create_borrower(self, cred: str, body: BorrowerIn, today: date) -> Borrower:
+        await self._check_unique(cred, body)
+        if body.national_id:
+            await self._nid_type(cred)  # fail before creating anything if the NID type isn't set up
         result = await self._post(
             cred,
             "/clients",
@@ -799,6 +840,7 @@ class FineractBackend:
         return await self._borrower(cred, client_id)
 
     async def update_borrower(self, cred: str, borrower_id: int, body: BorrowerIn) -> Borrower:
+        await self._check_unique(cred, body, except_id=borrower_id)
         await self._req(
             cred, "PUT", f"/clients/{borrower_id}", self._client_body(body, await self._gender_id(cred, body.gender))
         )
@@ -855,7 +897,20 @@ class FineractBackend:
         return self._document(meta), resp.content
 
     async def create_application(self, cred: str, borrower_id: int, body: ApplicationIn, today: date) -> LoanSummary:
-        return await self._submit_loan(cred, borrower_id, body.amount, body.months, today)
+        accounts = await self._get(cred, f"/clients/{borrower_id}/accounts")
+        if any(int((a.get("status") or {}).get("id", 0)) == 100 for a in (accounts or {}).get("loanAccounts", [])):
+            raise BackendError("This borrower already has an application waiting for a decision.", 409)
+        summary = await self._submit_loan(cred, borrower_id, body.amount, body.months, today)
+        if body.purpose:
+            try:
+                await self._post(cred, f"/loans/{summary.id}/notes", {"note": f"Purpose: {body.purpose}"})
+            except BackendError as e:  # the application stands even if the note can't be saved
+                log.warning("Could not save the purpose note on loan %s: %s", summary.id, e.message)
+        return summary
+
+
+def _nid_key(nid: str) -> str:
+    return "".join(c for c in nid if c.isalnum()).lower()
 
 
 def _is_nid(name: str) -> bool:

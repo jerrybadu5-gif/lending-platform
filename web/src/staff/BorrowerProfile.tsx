@@ -7,10 +7,11 @@ import {
 import { Button, DataTable, ErrorNote, Field, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
 import { pillFor } from '../lib/loan'
+import { DownloadLink } from '../components/DownloadLink'
 
 const KYC_KINDS: DocumentKind[] = ['id', 'payslip', 'bank_statement', 'deduction_authority']
 const TERMS = [3, 6, 12, 18, 24, 36]
-const ACCEPT = 'application/pdf,image/jpeg,image/png,image/webp'
+const ACCEPT = 'application/pdf,image/jpeg,image/png'
 
 export function BorrowerProfile() {
   const id = Number(useParams().id)
@@ -112,7 +113,7 @@ function KycChecklist({ p }: { p: Profile }) {
   return (
     <section className="ml-card flex flex-col gap-3" aria-label="Documents needed for approval">
       <h2 className="ml-h2">Documents for approval</h2>
-      <p className="m-0 text-[13px] text-ink-muted">PDF or photo (JPG, PNG), up to 10 MB each. A loan can't be approved until these are on file.</p>
+      <p className="m-0 text-[13px] text-ink-muted">PDF or photo (JPG, PNG), up to 5 MB each. A loan can't be approved until these are on file.</p>
       <ul className="m-0 p-0 list-none flex flex-col">
         {KYC_KINDS.map((kind) => {
           const n = p.kyc.have[kind] ?? 0
@@ -146,7 +147,7 @@ function Documents({ p }: { p: Profile }) {
       <DataTable rows={p.documents} empty="No documents yet. Upload them from the checklist."
         columns={[
           { key: 'kind', label: 'Document', render: (d) => DOCUMENT_LABELS[d.kind] },
-          { key: 'file_name', label: 'File', render: (d) => <a href={files.document(p.borrower.id, d.id)} download>{d.file_name}</a> },
+          { key: 'file_name', label: 'File', render: (d) => <DownloadLink href={files.document(p.borrower.id, d.id)}>{d.file_name}</DownloadLink> },
           { key: 'uploaded_on', label: 'Uploaded', render: (d) => formatDate(d.uploaded_on) },
           { key: 'size', label: 'Size', align: 'right', render: (d) => size(d.size) },
         ]} />

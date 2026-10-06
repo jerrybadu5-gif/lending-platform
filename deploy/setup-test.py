@@ -43,7 +43,7 @@ DT = [bootstrap.BORROWER_TABLE, bootstrap.ASSESSMENT_TABLE]
 DT_RW = [f"{op}_{t}" for t in DT for op in ("READ", "CREATE", "UPDATE")]
 # Staff also keep the borrower profile (bank account, next of kin) and KYC documents. The portal does not.
 STAFF_KYC = [f"{op}_{bootstrap.PROFILE_TABLE}" for op in ("READ", "CREATE", "UPDATE")] + [
-    "CREATE_DOCUMENT", "READ_DOCUMENT", "CREATE_CLIENTIDENTIFIER", "UPDATE_CLIENTIDENTIFIER",
+    "CREATE_DOCUMENT", "READ_DOCUMENT", "CREATE_CLIENTIDENTIFIER", "UPDATE_CLIENTIDENTIFIER", "CREATE_LOANNOTE",
 ]
 ROLES = {
     "Credit Manager": (

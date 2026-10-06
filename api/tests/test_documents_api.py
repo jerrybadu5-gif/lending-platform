@@ -58,3 +58,12 @@ def test_portal_borrower_gets_own_statement(client, sms):
     r = client.get("/api/portal/loan/statement.pdf")
     assert r.status_code == 200 and text_in(r.content, "Mary Kila") and text_in(r.content, "LN-000482")
     assert client.get("/api/portal/loan/schedule.pdf").status_code == 200
+
+
+def test_agreement_is_dated_on_approval_not_reprint(staff):
+    staff.post("/api/staff/loans/536/approve", json={"amount": "13000"})
+    loan = staff.get("/api/staff/loans/536").json()
+    assert loan["approved_on"]
+    day = loan["approved_on"]
+    dmy = f"{day[8:10]}/{day[5:7]}/{day[0:4]}"
+    assert text_in(staff.get("/api/staff/loans/536/agreement.pdf").content, f"dated {dmy}")

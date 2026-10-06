@@ -123,6 +123,7 @@ class LoanEvent(BaseModel):
 
 
 class LoanDetail(LoanSummary):
+    approved_on: date | None = None
     interest_method: InterestMethod = "DECLINING_BALANCE"
     repayments_per_year: Decimal = Decimal(12)  # 12 monthly, 26 fortnightly, 52 weekly
     borrower: Borrower

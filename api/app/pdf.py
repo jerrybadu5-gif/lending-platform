@@ -373,7 +373,10 @@ def loan_agreement(
         else "To be confirmed before payout"
     )
 
-    story: list = [P("Loan agreement", "title"), P(f"Agreement number {loan.ref}, dated {dmy(today)}", "small")]
+    story: list = [
+        P("Loan agreement", "title"),
+        P(f"Agreement number {loan.ref}, dated {dmy(loan.approved_on or today)}", "small"),
+    ]
     if not reviewed:
         story.append(
             P(

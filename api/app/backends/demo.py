@@ -88,6 +88,7 @@ class DemoLoan:
     submitted_on: date
     disbursed_on: date | None = None
     first_due: date | None = None
+    approved_on: date | None = None
     payments: list[Pay] = field(default_factory=list)
     assessment: Assessment | None = None
     history: list[LoanEvent] = field(default_factory=list)
@@ -401,6 +402,7 @@ class DemoBackend:
         return LoanDetail(
             **s.model_dump(),
             interest_method=cast(InterestMethod, loan.method),
+            approved_on=loan.approved_on or loan.disbursed_on,
             borrower=self.borrowers[loan.borrower_id],
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),
@@ -438,7 +440,7 @@ class DemoBackend:
         if body.amount > loan.principal:
             raise BackendError("The approved amount can't be more than the amount applied for.", 422)
         loan.principal = body.amount
-        loan.state = "APPROVED"
+        loan.state, loan.approved_on = "APPROVED", today
         loan.history.append(
             LoanEvent(
                 when=today.isoformat(),

@@ -22,7 +22,7 @@ from ..domain.models import (
     KycStatus,
     LoanSummary,
 )
-from ..domain.uploads import UploadRejected, check_upload
+from ..domain.uploads import UploadRejected, check_upload, content_disposition
 from ..security import StaffSession, staff_session
 from ..underwriting import assess_loan
 
@@ -100,13 +100,13 @@ async def download(
         data,
         media_type=doc.content_type if doc.content_type in SAFE_TYPES else "application/octet-stream",
         headers={
-            "Content-Disposition": f'attachment; filename="{doc.file_name}"',
+            "Content-Disposition": content_disposition(doc.file_name),
             "Cache-Control": "private, no-store",
         },
     )
 
 
-SAFE_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+SAFE_TYPES = {"application/pdf", "image/jpeg", "image/png"}
 
 
 @router.post("/{borrower_id}/applications", response_model=LoanSummary, status_code=201)

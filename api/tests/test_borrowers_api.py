@@ -143,3 +143,27 @@ def test_safe_file_names():
     assert safe_file_name("C:\\Users\\me\\Scan 01.JPG", ".jpg") == "Scan 01.jpg"
     assert safe_file_name("", ".pdf") == "document.pdf"
     assert safe_file_name("....", ".png") == "document.png"
+
+
+def test_disbursement_also_needs_kyc(staff):
+    # A loan approved elsewhere (or before the check existed) can't be paid out without documents.
+    staff.app.state.services.settings.kyc_required_for_approval = False
+    assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
+    staff.app.state.services.settings.kyc_required_for_approval = True
+    r = staff.post("/api/staff/loans/542/disburse")
+    assert r.status_code == 409 and "Bank statement" in r.json()["detail"]
+
+
+def test_download_header_survives_odd_file_names(staff):
+    backend = staff.app.state.services.backend
+    doc = backend._store_document(1, "other", 'payslip–Oct "final".pdf', "application/pdf", PDF, date.today())
+    r = staff.get(f"/api/staff/borrowers/1/documents/{doc.id}")
+    assert r.status_code == 200
+    cd = r.headers["content-disposition"]
+    assert cd.startswith('attachment; filename="') and "filename*=UTF-8''payslip%E2%80%93Oct" in cd
+
+
+def test_webp_is_refused(staff):
+    webp = b"RIFF\x00\x00\x00\x00WEBPVP8 "
+    r = staff.post("/api/staff/borrowers/1/documents", data={"kind": "id"}, files={"file": ("a.webp", webp, "x")})
+    assert r.status_code == 422

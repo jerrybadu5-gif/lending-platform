@@ -5,6 +5,7 @@ import { api, ApiError, files } from '../api/client'
 import { Button, ErrorNote, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, weekdayDate } from '../lib/format'
 import { PortalShell } from './PortalShell'
+import { DownloadLink } from '../components/DownloadLink'
 
 export default function PortalHome() {
   const q = useQuery({ queryKey: ['portal', 'home'], queryFn: api.portal.home })
@@ -83,8 +84,8 @@ export default function PortalHome() {
 
           <section className="ml-card flex flex-col gap-2" style={{ padding: 16 }} aria-label="Your documents">
             <h2 className="ml-h2">Your documents</h2>
-            <a href={files.portalStatement} download className="ml-btn justify-center no-underline">Download statement (PDF)</a>
-            <a href={files.portalSchedule} download className="ml-btn ml-btn-quiet justify-center no-underline">Repayment schedule (PDF)</a>
+            <DownloadLink href={files.portalStatement} className="ml-btn justify-center no-underline">Download statement (PDF)</DownloadLink>
+            <DownloadLink href={files.portalSchedule} className="ml-btn ml-btn-quiet justify-center no-underline">Repayment schedule (PDF)</DownloadLink>
           </section>
 
           <section className="ml-card flex flex-col gap-3" style={{ padding: 16 }}>

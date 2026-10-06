@@ -14,7 +14,7 @@
    ├─ portal calls run as a limited "portal" Fineract user and only ever read the signed-in borrower's loans
    ├─ affordability check (app/domain/risk.py), stored in Fineract data table dt_loan_assessment
    ├─ borrowers: Fineract clients + NID identifier + data tables dt_borrower_financials, dt_borrower_profile
-   ├─ KYC files: Fineract client documents (type checked from the file's first bytes, 10 MB limit)
+   ├─ KYC files: Fineract client documents (type checked from the file's first bytes, 5 MB limit)
    └─ PDFs (app/pdf.py, ReportLab): loan agreement, repayment schedule, statement, receipt
    └─ SMS interface (console for now; Digicel PNG and Vodafone PNG adapters at shipping time)
         │
@@ -49,7 +49,7 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 - Sessions live on the server. The HttpOnly, SameSite=Strict cookie holds only a random session id, signed with `MCL_SESSION_SECRET`; the staff member's Fineract key never leaves the server. Sessions expire after `MCL_SESSION_HOURS`, and signing out ends them.
 - Staff sign-in is limited to 10 tries per 5 minutes per user and address. SMS codes are limited to 5 requests per 15 minutes per number and per address. The code request answers the same way for unknown numbers, so it can't be used to find out who borrows from Breez Lending.
 - Approve, reject and disburse need a credit manager role in McLender, and Fineract's own permissions and maker-checker still apply.
-- KYC uploads: the file type is read from the file's first bytes (PDF, JPEG, PNG, WEBP only), never from its name; names are cleaned; 10 MB limit (`MCL_MAX_UPLOAD_MB`). Downloads are always sent as attachments, never shown inline. The portal's Fineract user has no access to bank or next-of-kin details (`dt_borrower_profile`) or to documents.
+- KYC uploads: the file type is read from the file's first bytes (PDF, JPEG, PNG only), never from its name; names are cleaned; 5 MB limit, the same as Fineract's (`MCL_MAX_UPLOAD_MB`). Downloads are always sent as attachments, never shown inline. The KYC check runs at approval and again at disbursement. The portal's Fineract user has no access to bank or next-of-kin details (`dt_borrower_profile`) or to documents.
 - Loans can't be approved until the borrower's KYC documents are on file (`MCL_KYC_REQUIRED`, `MCL_KYC_REQUIRED_FOR_APPROVAL`).
 - Money is `Decimal` in Python and a decimal string in JSON and in the browser. No floating-point maths touches amounts.
 - Caddy sends a strict Content-Security-Policy and other security headers. The API sends `Cache-Control: no-store`. The service worker caches the app shell only, never API answers.

@@ -63,7 +63,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {"id": 1, "payslip": 1, "bank_statement": 1, "deduction_authority": 1}
     )
     kyc_required_for_approval: bool = True
-    max_upload_mb: int = 10
+    max_upload_mb: int = 5  # Fineract's own document limit is 5 MB
 
     # The loan agreement is a draft template until a PNG lawyer has reviewed the wording. While this is
     # false, every page says so.

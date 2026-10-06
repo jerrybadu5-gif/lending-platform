@@ -242,6 +242,7 @@ def test_create_borrower_writes_client_identifier_and_tables(fb):
         200, json=[{"id": 21, "name": "Female"}, {"id": 22, "name": "Male"}]
     )
     respx.get(f"{BASE}/codes/1/codevalues").respond(200, json=[{"id": 31, "name": "National ID (NID)"}])
+    respx.get(f"{BASE}/search").respond(200, json=[])
     client = respx.post(f"{BASE}/clients").respond(200, json={"clientId": 77, "resourceId": 77})
     ident = respx.post(f"{BASE}/clients/77/identifiers").respond(200, json={"resourceId": 5})
     respx.get(f"{BASE}/datatables/dt_borrower_profile/77").respond(200, json=[])
@@ -282,7 +283,8 @@ def test_missing_nid_type_explains_the_fix(fb):
 
     respx.get(f"{BASE}/codes").respond(200, json=[{"id": 1, "name": "Customer Identifier"}])
     respx.get(f"{BASE}/codes/1/codevalues").respond(200, json=[{"id": 30, "name": "Passport"}])
-    respx.post(f"{BASE}/clients").respond(200, json={"clientId": 78})
+    respx.get(f"{BASE}/search").respond(200, json=[])
+    created = respx.post(f"{BASE}/clients").respond(200, json={"clientId": 78})
     body = BorrowerIn(
         first_name="A",
         last_name="B",
@@ -294,7 +296,7 @@ def test_missing_nid_type_explains_the_fix(fb):
     )
     with pytest.raises(BackendError) as e:
         run(fb.create_borrower("K", body, TODAY))
-    assert "number 78" in e.value.message and "National ID" in e.value.message
+    assert "National ID" in e.value.message and not created.called  # nothing half-created
 
 
 @respx.mock
@@ -351,3 +353,70 @@ def test_search_merges_client_and_identifier_hits(fb):
     )
     hits = run(fb.search_borrowers("K", "wambi"))
     assert [(h.id, h.name) for h in hits] == [(8, "Peter Wambi"), (1, "Mary Kila")]
+
+
+@respx.mock
+def test_document_download_does_not_ask_for_json(fb):
+    respx.get(f"{BASE}/clients/8/documents/41").respond(200, json={"id": 41, "name": "id", "fileName": "a.pdf"})
+    route = respx.get(f"{BASE}/clients/8/documents/41/attachment").respond(200, content=b"%PDF")
+    run(fb.get_document("K", 8, 41))
+    assert route.calls[0].request.headers["Accept"] == "*/*"
+
+
+@respx.mock
+def test_duplicate_phone_or_nid_is_refused_before_anything_is_created(fb):
+    from app.domain.models import BorrowerIn
+
+    body = BorrowerIn(
+        first_name="Kila",
+        last_name="Morea",
+        phone="7012 3344",
+        date_of_birth=date(1990, 4, 12),
+        gender="female",
+        address="Tokarara",
+        national_id="2009 1182 4410",
+    )
+    created = respx.post(f"{BASE}/clients").respond(200, json={"clientId": 99})
+    respx.get(f"{BASE}/search", params={"resource": "clients"}).respond(
+        200, json=[{"entityId": 1, "entityType": "CLIENT", "entityName": "Mary Kila"}]
+    )
+    respx.get(f"{BASE}/clients/1").respond(200, json={"id": 1, "displayName": "Mary Kila", "mobileNo": "70123344"})
+    with pytest.raises(BackendError) as e:
+        run(fb.create_borrower("K", body, TODAY))
+    assert e.value.status == 409 and "Mary Kila" in e.value.message and not created.called
+
+    respx.get(f"{BASE}/search", params={"resource": "clients"}).respond(200, json=[])
+    respx.get(f"{BASE}/search", params={"resource": "clientIdentifiers"}).respond(
+        200,
+        json=[
+            {
+                "entityId": 3,
+                "entityType": "CLIENTIDENTIFIER",
+                "entityName": "2009-1182-4410",
+                "parentId": 1,
+                "parentName": "Mary Kila",
+            }
+        ],
+    )
+    with pytest.raises(BackendError) as e:
+        run(fb.create_borrower("K", body.model_copy(update={"phone": "75550000"}), TODAY))
+    assert "NID" in e.value.message and not created.called
+
+
+@respx.mock
+def test_clearing_bank_details_sends_nulls(fb):
+    respx.get(f"{BASE}/datatables/dt_borrower_profile/8").respond(200, json=[{"bank_name": "BSP"}])
+    put = respx.put(f"{BASE}/datatables/dt_borrower_profile/8").respond(200, json={})
+    run(fb._upsert("K", "dt_borrower_profile", 8, {"bank_name": None, "address": "Hohola"}, clear_empty=True))
+    sent = json.loads(put.calls[0].request.content)
+    assert sent["bank_name"] is None and sent["address"] == "Hohola"
+
+
+@respx.mock
+def test_staff_application_refused_when_one_is_waiting(fb):
+    from app.domain.models import ApplicationIn
+
+    respx.get(f"{BASE}/clients/8/accounts").respond(200, json={"loanAccounts": [{"id": 536, "status": {"id": 100}}]})
+    with pytest.raises(BackendError) as e:
+        run(fb.create_application("K", 8, ApplicationIn(amount=D("1000"), months=6), TODAY))
+    assert e.value.status == 409

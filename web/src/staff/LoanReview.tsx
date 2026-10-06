@@ -5,6 +5,7 @@ import { api, files, type ActionResult, type LoanDetail } from '../api/client'
 import { AssessmentCard, Button, DataTable, ErrorNote, Field, LoanStepper, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
 import { pillFor, stepFor } from '../lib/loan'
+import { DownloadLink } from '../components/DownloadLink'
 
 function suggestedAmount(l: LoanDetail): string {
   const cap = l.assessment ? Number(l.assessment.max_recommended_principal) : Number(l.principal)
@@ -118,7 +119,7 @@ function LoanDocuments({ loan }: { loan: LoanDetail }) {
     <section className="ml-card flex flex-col gap-3" aria-label="Documents">
       <h2 className="ml-h2">Print</h2>
       <div className="flex flex-wrap gap-2">
-        {links.map((l) => <a key={l.label} href={l.href} download className="ml-btn ml-btn-sm no-underline">{l.label} (PDF)</a>)}
+        {links.map((l) => <DownloadLink key={l.label} href={l.href} className="ml-btn ml-btn-sm no-underline">{l.label} (PDF)</DownloadLink>)}
       </div>
       {loan.state === 'PENDING' && <p className="m-0 text-[13px] text-ink-muted">The loan agreement can be printed once the loan is approved.</p>}
       {loan.payments.length > 0 && (
@@ -128,7 +129,7 @@ function LoanDocuments({ loan }: { loan: LoanDetail }) {
             {loan.payments.slice(0, 6).map((p, i) => (
               <li key={p.id ?? i} className="flex justify-between gap-3">
                 <span>{formatDate(p.paid_on)} · {formatKina(p.amount)} · {p.method}</span>
-                {p.id != null && <a href={files.receipt(loan.id, p.id)} download>Receipt</a>}
+                {p.id != null && <DownloadLink href={files.receipt(loan.id, p.id)}>Receipt</DownloadLink>}
               </li>
             ))}
           </ul>

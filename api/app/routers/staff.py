@@ -106,12 +106,19 @@ async def approve(
     loan_id: int, body: ApproveIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
     _require_approver(s)
-    if svc.settings.kyc_required_for_approval:
-        detail = await svc.backend.get_loan(s.cred, loan_id, svc.today())
-        kyc = await borrower_kyc(svc, s.cred, detail.borrower.id)
-        if not kyc.complete:
-            raise HTTPException(409, "Upload these documents for the borrower first: " + "; ".join(kyc.missing) + ".")
+    await _require_kyc(svc, s.cred, loan_id)
     return await svc.backend.approve(s.cred, loan_id, body, svc.today())
+
+
+async def _require_kyc(svc: Services, cred: str, loan_id: int) -> None:
+    """Approval and payout both need the borrower's KYC documents on file (a loan may have been approved
+    elsewhere, e.g. in Mifos X or before this check existed)."""
+    if not svc.settings.kyc_required_for_approval:
+        return
+    detail = await svc.backend.get_loan(cred, loan_id, svc.today())
+    kyc = await borrower_kyc(svc, cred, detail.borrower.id)
+    if not kyc.complete:
+        raise HTTPException(409, "Upload these documents for the borrower first: " + "; ".join(kyc.missing) + ".")
 
 
 @router.post("/loans/{loan_id}/reject", response_model=ActionResult)
@@ -135,6 +142,7 @@ async def reject(
 @router.post("/loans/{loan_id}/disburse", response_model=ActionResult)
 async def disburse(loan_id: int, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
     _require_approver(s)
+    await _require_kyc(svc, s.cred, loan_id)
     return await svc.backend.disburse(s.cred, loan_id, svc.today())
 
 
