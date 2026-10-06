@@ -1,0 +1,48 @@
+"""Shared objects (back end, SMS, one-time codes, rate limits) and small helpers for the routers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import Request
+
+from .backends.base import LendingBackend
+from .config import Settings
+from .domain.risk import Policy
+from .security import OtpStore, RateLimiter, SessionStore
+from .sms import SmsSender
+
+
+@dataclass
+class Services:
+    settings: Settings
+    backend: LendingBackend
+    sms: SmsSender
+    otp: OtpStore
+    policy: Policy
+    login_limit: RateLimiter
+    otp_limit: RateLimiter
+    sessions: SessionStore
+
+    def today(self) -> date:
+        return datetime.now(local_zone(self.settings.timezone)).date()
+
+
+# Port Moresby is UTC+10 all year (no daylight saving), so a fixed offset is exact if the
+# time zone database is missing (Windows without the tzdata package).
+_FALLBACK = {"Pacific/Port_Moresby": timezone(timedelta(hours=10), "PGT")}
+
+
+def local_zone(name: str) -> tzinfo:
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name in _FALLBACK:
+            return _FALLBACK[name]
+        raise
+
+
+def services(request: Request) -> Services:
+    return request.app.state.services

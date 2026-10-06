@@ -1,0 +1,89 @@
+:root, [data-theme="light"] {
+  --surface: #f5f6f4;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eaedea;
+  --line: #d5dbd8;
+  --line-strong: #7c8986;
+  --ink: #14201e;
+  --ink-muted: #4f5d5a;
+  --brand: #0b5d57;
+  --on-brand: #ffffff;
+  --brand-soft: #d9ede9;
+  --brand-deep: #0f2a28;
+  --kina-gold: #8a5a00;
+  --kina-gold-soft: #fbecc8;
+  --success: #22663a;
+  --success-soft: #dcefe0;
+  --warning: #8a4b00;
+  --warning-soft: #fde9cf;
+  --danger: #b42318;
+  --danger-soft: #fbe1de;
+  --info: #1f4f8f;
+  --info-soft: #dde8f7;
+  --focus-ring: var(--brand);
+  --shadow-raised: 0 1px 2px rgba(15,42,40,0.08);
+}
+[data-theme="dark"] {
+  --surface: #0f1514;
+  --surface-raised: #172020;
+  --surface-sunken: #0a0f0e;
+  --line: #2b3836;
+  --line-strong: #62736f;
+  --ink: #e7eeec;
+  --ink-muted: #9fb0ac;
+  --brand: #5cc8bb;
+  --on-brand: #05201d;
+  --brand-soft: #11332f;
+  --brand-deep: #cfe7e2;
+  --kina-gold: #e9b85a;
+  --kina-gold-soft: #3a2a08;
+  --success: #86d39b;
+  --success-soft: #12301c;
+  --warning: #f3b061;
+  --warning-soft: #3b2408;
+  --danger: #ff8f80;
+  --danger-soft: #41120d;
+  --info: #93b9f2;
+  --info-soft: #132a4a;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #0f1514;
+    --surface-raised: #172020;
+    --surface-sunken: #0a0f0e;
+    --line: #2b3836;
+    --line-strong: #62736f;
+    --ink: #e7eeec;
+    --ink-muted: #9fb0ac;
+    --brand: #5cc8bb;
+    --on-brand: #05201d;
+    --brand-soft: #11332f;
+    --brand-deep: #cfe7e2;
+    --kina-gold: #e9b85a;
+    --kina-gold-soft: #3a2a08;
+    --success: #86d39b;
+    --success-soft: #12301c;
+    --warning: #f3b061;
+    --warning-soft: #3b2408;
+    --danger: #ff8f80;
+    --danger-soft: #41120d;
+    --info: #93b9f2;
+    --info-soft: #132a4a;
+    color-scheme: dark;
+  }
+}
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}

@@ -1,0 +1,51 @@
+{
+  // Terminal > Run Task... (or Ctrl+Shift+B for "Start McLender demo")
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Setup: install API and web",
+      "type": "shell",
+      "command": "cd api; if (-not (Test-Path .venv)) { python -m venv .venv }; .\\.venv\\Scripts\\python.exe -m pip install -e \".[dev]\"; cd ..\\web; npm install",
+      "options": { "shell": { "executable": "powershell.exe" } },
+      "problemMatcher": []
+    },
+    {
+      "label": "API (sample data)",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000 --reload",
+      "options": { "cwd": "${workspaceFolder}/api", "env": { "MCL_DEV_SMS_INBOX": "true" }, "shell": { "executable": "powershell.exe" } },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Web app",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/web", "shell": { "executable": "powershell.exe" } },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Start McLender demo",
+      "dependsOn": ["API (sample data)", "Web app"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: API",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest",
+      "options": { "cwd": "${workspaceFolder}/api", "shell": { "executable": "powershell.exe" } },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: web",
+      "type": "shell",
+      "command": "npm test",
+      "options": { "cwd": "${workspaceFolder}/web", "shell": { "executable": "powershell.exe" } },
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

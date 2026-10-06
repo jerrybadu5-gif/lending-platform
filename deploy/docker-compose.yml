@@ -1,0 +1,132 @@
+# McLender for Breez Lending: Apache Fineract + PostgreSQL + McLender API + McLender web app
+# (plus the Mifos X admin web app). Single-server deployment.
+# Based on github.com/openMF/mifosx-platform (postgresql/), trimmed for one office:
+#   - no ActiveMQ / worker nodes (not needed below ~50 concurrent users)
+#   - database port bound to localhost only
+#   - named volume for data, healthchecks, pinned-able image tags via .env
+#
+# Start:   docker compose --env-file .env up -d
+# Logs:    docker compose logs -f fineract-server
+# Stop:    docker compose down          (data is kept in the "pgdata" volume)
+
+name: lending
+
+services:
+  postgresql:
+    image: postgres:${POSTGRES_TAG:-16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      FINERACT_DB_USER: ${FINERACT_DB_USER}
+      FINERACT_DB_PASS: ${FINERACT_DB_PASS}
+      FINERACT_TENANTS_DB_NAME: fineract_tenants
+      FINERACT_TENANT_DEFAULT_DB_NAME: fineract_default
+      TZ: ${TIMEZONE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./backups:/backups
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -U ${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  fineract-server:
+    image: ${FINERACT_IMAGE:-apache/fineract:latest}
+    restart: unless-stopped
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    ports:
+      - "${FINERACT_BIND:-127.0.0.1}:${FINERACT_PORT:-8080}:8080"  # this PC only; McLender reaches it inside Docker
+    environment:
+      TZ: ${TIMEZONE}
+      FINERACT_NODE_ID: "1"
+      FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME: org.postgresql.Driver
+      FINERACT_HIKARI_JDBC_URL: jdbc:postgresql://postgresql:5432/fineract_tenants
+      FINERACT_HIKARI_USERNAME: ${FINERACT_DB_USER}
+      FINERACT_HIKARI_PASSWORD: ${FINERACT_DB_PASS}
+      FINERACT_HIKARI_MINIMUM_IDLE: "3"
+      FINERACT_HIKARI_MAXIMUM_POOL_SIZE: "10"
+      FINERACT_DEFAULT_TENANTDB_HOSTNAME: postgresql
+      FINERACT_DEFAULT_TENANTDB_PORT: "5432"
+      FINERACT_DEFAULT_TENANTDB_UID: ${FINERACT_DB_USER}
+      FINERACT_DEFAULT_TENANTDB_PWD: ${FINERACT_DB_PASS}
+      FINERACT_DEFAULT_TENANTDB_CONN_PARAMS: ""
+      FINERACT_DEFAULT_TENANTDB_TIMEZONE: ${TIMEZONE}
+      FINERACT_DEFAULT_TENANTDB_IDENTIFIER: default
+      FINERACT_DEFAULT_TENANTDB_NAME: fineract_default
+      FINERACT_DEFAULT_TENANTDB_DESCRIPTION: ${COMPANY_NAME}
+      FINERACT_SERVER_SSL_ENABLED: "false"   # terminate TLS at a reverse proxy in production
+      FINERACT_SERVER_PORT: "8080"
+      FINERACT_LOGGING_LEVEL: INFO
+      FINERACT_REPORT_ENGINE_BIRT_ENABLED: "true"
+    # First boot runs the database migrations and takes several minutes.
+    # Ready when this returns UP:  http://localhost:8080/fineract-provider/actuator/health
+
+  web-app:
+    image: ${WEBAPP_IMAGE:-openmf/web-app:dev}
+    restart: unless-stopped
+    depends_on:
+      - fineract-server
+    ports:
+      - "${MIFOS_BIND:-127.0.0.1}:${WEB_APP_PORT:-80}:80"
+    environment:
+      # This URL is called from the user's browser, so it must be reachable from staff PCs
+      FINERACT_API_URLS: ${PUBLIC_API_URL}
+      FINERACT_API_URL: ${PUBLIC_API_URL}
+      FINERACT_API_PROVIDER: /fineract-provider/api
+      FINERACT_API_VERSION: /v1
+      FINERACT_PLATFORM_TENANT_IDENTIFIER: default
+      MIFOS_DEFAULT_LANGUAGE: en-US
+      MIFOS_SUPPORTED_LANGUAGES: en-US
+      MIFOS_PRELOAD_CLIENTS: "true"
+      MIFOS_DEFAULT_CHAR_DELIMITER: ","
+      MIFOS_SESSION_IDLE_TIMEOUT: "900000"   # 15 min
+
+  # McLender API: sits between the web app and Fineract (never expose Fineract itself to the internet)
+  mclender-api:
+    build: ../api
+    image: ${MCLENDER_API_IMAGE:-mclender-api:local}
+    restart: unless-stopped
+    depends_on:
+      - fineract-server
+    environment:
+      MCL_BACKEND: ${MCL_BACKEND:-fineract}
+      MCL_COMPANY_NAME: ${COMPANY_NAME}
+      MCL_TIMEZONE: ${TIMEZONE}
+      MCL_FINERACT_URL: http://fineract-server:8080
+      MCL_FINERACT_TENANT: default
+      MCL_FINERACT_PORTAL_USER: ${MCL_FINERACT_PORTAL_USER}
+      MCL_FINERACT_PORTAL_PASSWORD: ${MCL_FINERACT_PORTAL_PASSWORD}
+      MCL_PORTAL_PRODUCT_ID: ${MCL_PORTAL_PRODUCT_ID:-1}
+      MCL_SESSION_SECRET: ${MCL_SESSION_SECRET}
+      MCL_COOKIE_SECURE: ${MCL_COOKIE_SECURE:-false}
+      MCL_ALLOWED_ORIGINS: '["${MCLENDER_PUBLIC_URL:-http://localhost:8088}"]'
+      MCL_POLICY_FILE: policy.json
+
+  # McLender web app (staff app at /staff, borrower portal at /portal), served by Caddy
+  mclender-web:
+    build: ../web
+    image: ${MCLENDER_WEB_IMAGE:-mclender-web:local}
+    restart: unless-stopped
+    depends_on:
+      - mclender-api
+    environment:
+      SITE_ADDRESS: ${MCLENDER_SITE_ADDRESS:-:80}
+      API_UPSTREAM: mclender-api:8000
+    ports:
+      # McLender is the way in for staff and borrowers, so it listens on the network by default.
+      - "${MCLENDER_BIND:-0.0.0.0}:${MCLENDER_PORT:-8088}:80"
+      - "${MCLENDER_BIND:-0.0.0.0}:${MCLENDER_TLS_PORT:-8443}:443"
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  pgdata:
+  caddy_data:

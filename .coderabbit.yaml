@@ -1,0 +1,17 @@
+# CodeRabbit settings for McLender. https://docs.coderabbit.ai/reference/configuration
+language: en-AU
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  auto_review:
+    enabled: true
+    base_branches: ["main"]
+  path_filters:
+    - "!design/mclender-ds/bundle.*"
+    - "!**/package-lock.json"
+  pre_merge_checks:
+    # Docstrings are written where they explain something (modules, non-obvious functions),
+    # not on every function, so a coverage percentage is not a useful gate here.
+    docstrings:
+      mode: "off"
