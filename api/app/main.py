@@ -34,8 +34,9 @@ def make_backend(settings: Settings, today) -> LendingBackend:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    if settings.backend == "fineract" and settings.session_secret == "dev-only-change-me":
-        raise RuntimeError("Set MCL_SESSION_SECRET before using the Fineract back end.")
+    weak = settings.session_secret.startswith(("dev-only", "change-me")) or len(settings.session_secret) < 32
+    if settings.backend == "fineract" and weak:
+        raise RuntimeError("Set MCL_SESSION_SECRET to a long random value (32+ characters) for the Fineract back end.")
     if settings.backend == "fineract" and not settings.cookie_secure:
         logging.getLogger("mclender").warning(
             "MCL_COOKIE_SECURE is off: sign-in cookies will also travel over plain HTTP. Turn it on behind HTTPS."

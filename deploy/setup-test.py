@@ -13,7 +13,9 @@ Run from the repository folder once Fineract is up (see docs/LIVE-TESTING.md):
 
     python deploy/setup-test.py
 
-Safe to run again: anything that already exists is left alone. Uses the Fineract admin login
+Safe to run again: anything that already exists is left alone.
+    python deploy/setup-test.py --new-passwords    # give grace and john new passwords
+ Uses the Fineract admin login
 mifos / password unless FINERACT_USER / FINERACT_PASSWORD are set.
 
 TEST DATA ONLY. Do not run this against the live Breez Lending server.
@@ -77,9 +79,14 @@ def items(res):
 
 
 def main() -> None:
+    new_passwords = "--new-passwords" in sys.argv[1:]  # read now: the data table step resets sys.argv
     env = read_env()
     os.environ.setdefault("FINERACT_URL", f"http://localhost:{env.get('FINERACT_PORT', '8080')}")
     f = Fineract.from_env()
+    portal_user = env.get("MCL_FINERACT_PORTAL_USER", "portal")
+    portal_pw = env.get("MCL_FINERACT_PORTAL_PASSWORD", "")
+    if not portal_pw or portal_pw.startswith("change-me"):
+        sys.exit("Set MCL_FINERACT_PORTAL_PASSWORD in deploy/.env first (see docs/LIVE-TESTING.md step 1).")
     try:
         f.get("/offices")
     except FineractError as e:
@@ -146,11 +153,15 @@ def main() -> None:
     step("Staff and users")
     users = {u["username"]: u for u in f.get("/users")}
     staff = {s["displayName"]: s["id"] for s in items(f.get("/staff?status=all"))}
-    logins = []
 
     def user(username, first, last, role, password=None, is_staff=True):
         if username in users:
-            print(f"= {username}")
+            if new_passwords and is_staff:
+                password = "Mcl-" + secrets.token_urlsafe(9)
+                f.put(f"/users/{users[username]['id']}", {"password": password, "repeatPassword": password})
+                print(f"* {username:<8} new password: {password}   <- write this down")
+            else:
+                print(f"= {username}")
             return
         body = {
             "username": username, "firstname": first, "lastname": last, "email": f"{username}@example.com",
@@ -166,16 +177,12 @@ def main() -> None:
             body["staffId"] = staff[display]
         password = password or "Mcl-" + secrets.token_urlsafe(9)
         f.post("/users", {**body, "password": password, "repeatPassword": password})
-        logins.append((username, "(the password in deploy/.env)" if is_staff is False else password, role))
-        print(f"+ {username} ({role})")
+        shown = f"password: {password}   <- write this down" if is_staff else "password: the one in deploy/.env"
+        print(f"+ {username:<8} ({role}) {shown}")
 
     user("grace", "Grace", "Pokana", "Credit Manager")
     user("john", "John", "Kerema", "Loan Officer")
-    portal_pw = env.get("MCL_FINERACT_PORTAL_PASSWORD", "")
-    if not portal_pw or portal_pw.startswith("change-me"):
-        sys.exit("Set MCL_FINERACT_PORTAL_PASSWORD in deploy/.env first (see docs/LIVE-TESTING.md step 1).")
-    user(env.get("MCL_FINERACT_PORTAL_USER", "portal"), "Borrower", "Portal", "Borrower Portal",
-         password=portal_pw, is_staff=False)
+    user(portal_user, "Borrower", "Portal", "Borrower Portal", password=portal_pw, is_staff=False)
 
     step("Test borrowers")
     start = TODAY - timedelta(days=75)
@@ -230,11 +237,7 @@ def main() -> None:
         apply(joyce, 8000, 12, TODAY - timedelta(days=1))
         print("  + applied for K 8,000 over 12 months")
 
-    print("\nDone.")
-    if logins:
-        print("\nNew Fineract logins (shown once; write them down):")
-        for u, p, r in logins:
-            print(f"  {u:<8} {p:<20} {r}")
+    print("\nDone. Passwords are shown only when a user is created (or with --new-passwords).")
 
 
 if __name__ == "__main__":
