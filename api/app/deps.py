@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Request
 
@@ -26,7 +26,21 @@ class Services:
     otp_limit: RateLimiter
 
     def today(self) -> date:
-        return datetime.now(ZoneInfo(self.settings.timezone)).date()
+        return datetime.now(local_zone(self.settings.timezone)).date()
+
+
+# Port Moresby is UTC+10 all year (no daylight saving), so a fixed offset is exact if the
+# time zone database is missing (Windows without the tzdata package).
+_FALLBACK = {"Pacific/Port_Moresby": timezone(timedelta(hours=10), "PGT")}
+
+
+def local_zone(name: str) -> tzinfo:
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name in _FALLBACK:
+            return _FALLBACK[name]
+        raise
 
 
 def services(request: Request) -> Services:

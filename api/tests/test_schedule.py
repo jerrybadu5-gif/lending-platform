@@ -34,3 +34,16 @@ def test_png_phone_numbers():
     assert normalise_phone("+675 7123 4567") == "71234567"
     assert normalise_phone("675-71234567") == "71234567"
     assert normalise_phone("7123 4567") == "71234567"
+
+
+def test_port_moresby_time_without_tz_database(monkeypatch):
+    import app.deps as deps
+
+    def missing(name):
+        raise deps.ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(deps, "ZoneInfo", missing)
+    tz = deps.local_zone("Pacific/Port_Moresby")
+    from datetime import datetime, timedelta
+
+    assert tz.utcoffset(datetime(2026, 1, 1)) == timedelta(hours=10)

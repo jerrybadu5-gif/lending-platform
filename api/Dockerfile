@@ -3,7 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install "fastapi>=0.115" "uvicorn[standard]>=0.30" "pydantic>=2.8" \
-    "pydantic-settings>=2.4" "httpx>=0.27" "itsdangerous>=2.2"
+    "pydantic-settings>=2.4" "httpx>=0.27" "itsdangerous>=2.2" "tzdata>=2024.1"
 COPY app ./app
 COPY policy.json ./policy.json
 RUN useradd --system --uid 10001 mclender
