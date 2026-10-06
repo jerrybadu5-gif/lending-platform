@@ -36,6 +36,18 @@ def test_home_shows_only_own_loan(client, sms):
     assert len(loan["recent_payments"]) == 3
 
 
+def test_home_without_any_loan(client, sms, monkeypatch):
+    login(client, sms)
+
+    async def no_loans(borrower_id, today):
+        return []
+
+    monkeypatch.setattr(client.app.state.services.backend, "borrower_loans", no_loans)
+    r = client.get("/api/portal/home")
+    assert r.status_code == 200
+    assert r.json()["first_name"] == "Mary" and r.json()["loan"] is None
+
+
 def test_portal_needs_session(client):
     assert client.get("/api/portal/home").status_code == 401
 

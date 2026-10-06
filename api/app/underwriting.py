@@ -7,8 +7,9 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import cast
 
-from .domain.models import Assessment, LoanDetail, Quote
+from .domain.models import Assessment, LoanDetail, Quote, Recommendation
 from .domain.risk import FLAT, Applicant, LoanTerms, Policy, assess, installment, money
 
 
@@ -29,6 +30,7 @@ def assess_loan(loan: LoanDetail, policy: Policy, today: date) -> Assessment:
         installments=loan.term_months,
         interest_type=FLAT if loan.interest_method == "FLAT" else "DECLINING_BALANCE",
         scheduled_installment=scheduled,
+        periods_per_year=loan.repayments_per_year,
     )
     a = assess(
         Applicant(
@@ -41,7 +43,7 @@ def assess_loan(loan: LoanDetail, policy: Policy, today: date) -> Assessment:
         policy,
     )
     return Assessment(
-        recommendation=a.recommendation,
+        recommendation=cast(Recommendation, a.recommendation),
         risk_score=a.risk_score,
         monthly_payment=a.monthly_payment,
         dti=a.dti,

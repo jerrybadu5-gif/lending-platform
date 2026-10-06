@@ -1,8 +1,9 @@
-"""Sessions (signed, time-limited cookies), one-time codes and a simple rate limiter.
+"""Sessions, one-time codes and a simple rate limiter.
 
-The staff cookie carries the staff member's Fineract credential, signed so it can't be
-forged. It is HttpOnly and SameSite=Strict, so page scripts can't read it and other
-sites can't send it. One-time codes are kept hashed in memory: run a single API worker,
+Sessions live on the server. The browser only gets a random session id in an HttpOnly,
+SameSite=Strict cookie (signed, so a tampered id is rejected before any lookup); the
+staff member's Fineract credential never leaves the server. Sessions, one-time codes and
+rate limits are kept in memory: run a single API worker (a restart signs everyone out),
 or move them to the database before scaling out.
 """
 
@@ -14,45 +15,15 @@ import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request, Response
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from itsdangerous import BadSignature, URLSafeSerializer
 
 from .config import Settings
 
 STAFF_COOKIE = "mcl_staff"
 PORTAL_COOKIE = "mcl_portal"
-
-
-def _serializer(settings: Settings, salt: str) -> URLSafeTimedSerializer:
-    return URLSafeTimedSerializer(settings.session_secret, salt=salt)
-
-
-def set_session(response: Response, settings: Settings, cookie: str, data: dict) -> None:
-    token = _serializer(settings, cookie).dumps(data)
-    response.set_cookie(
-        cookie,
-        token,
-        max_age=settings.session_hours * 3600,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="strict",
-        path="/",
-    )
-
-
-def clear_session(response: Response, cookie: str) -> None:
-    response.delete_cookie(cookie, path="/")
-
-
-def read_session(request: Request, settings: Settings, cookie: str) -> dict | None:
-    token = request.cookies.get(cookie)
-    if not token:
-        return None
-    try:
-        return _serializer(settings, cookie).loads(token, max_age=settings.session_hours * 3600)
-    except (BadSignature, SignatureExpired):
-        return None
 
 
 @dataclass
@@ -63,22 +34,99 @@ class StaffSession:
     cred: str
 
 
-def _settings(request: Request) -> Settings:
-    return request.app.state.services.settings
+@dataclass
+class PortalSession:
+    borrower_id: int
+    first_name: str
 
 
-def staff_session(request: Request, settings: Settings = Depends(_settings)) -> StaffSession:
-    data = read_session(request, settings, STAFF_COOKIE)
-    if not data:
+class SessionStore:
+    """Server-side sessions keyed by a random id, each with an absolute expiry."""
+
+    def __init__(self, hours: int):
+        self.ttl = hours * 3600
+        self._items: dict[str, tuple[float, Any]] = {}
+
+    def create(self, data: Any) -> str:
+        self._sweep()
+        sid = secrets.token_urlsafe(32)
+        self._items[sid] = (time.monotonic() + self.ttl, data)
+        return sid
+
+    def get(self, sid: str) -> Any | None:
+        item = self._items.get(sid)
+        if not item:
+            return None
+        if time.monotonic() > item[0]:
+            del self._items[sid]
+            return None
+        return item[1]
+
+    def delete(self, sid: str) -> None:
+        self._items.pop(sid, None)
+
+    def _sweep(self) -> None:
+        now = time.monotonic()
+        for k in [k for k, (exp, _) in self._items.items() if now > exp]:
+            del self._items[k]
+
+
+def _signer(settings: Settings, cookie: str) -> URLSafeSerializer:
+    return URLSafeSerializer(settings.session_secret, salt=cookie)
+
+
+def _services(request: Request) -> Any:
+    return request.app.state.services
+
+
+def start_session(response: Response, svc: Any, cookie: str, data: StaffSession | PortalSession) -> None:
+    sid = svc.sessions.create(data)
+    response.set_cookie(
+        cookie,
+        _signer(svc.settings, cookie).dumps(sid),
+        max_age=svc.settings.session_hours * 3600,
+        httponly=True,
+        secure=svc.settings.cookie_secure,
+        samesite="strict",
+        path="/",
+    )
+
+
+def _session_id(request: Request, settings: Settings, cookie: str) -> str | None:
+    token = request.cookies.get(cookie)
+    if not token:
+        return None
+    try:
+        return str(_signer(settings, cookie).loads(token))
+    except BadSignature:
+        return None
+
+
+def end_session(request: Request, response: Response, svc: Any, cookie: str) -> None:
+    sid = _session_id(request, svc.settings, cookie)
+    if sid:
+        svc.sessions.delete(sid)
+    response.delete_cookie(cookie, path="/")
+
+
+def _lookup(request: Request, svc: Any, cookie: str, kind: type) -> Any | None:
+    sid = _session_id(request, svc.settings, cookie)
+    data = svc.sessions.get(sid) if sid else None
+    return data if isinstance(data, kind) else None
+
+
+def staff_session(request: Request, svc: Any = Depends(_services)) -> StaffSession:
+    data = _lookup(request, svc, STAFF_COOKIE, StaffSession)
+    if data is None:
         raise HTTPException(401, "Please sign in.")
-    return StaffSession(**data)
+    return data
 
 
-def portal_session(request: Request, settings: Settings = Depends(_settings)) -> int:
-    data = read_session(request, settings, PORTAL_COOKIE)
-    if not data:
+def portal_session(request: Request, svc: Any = Depends(_services)) -> PortalSession:
+    data = _lookup(request, svc, PORTAL_COOKIE, PortalSession)
+    if data is None:
         raise HTTPException(401, "Please sign in with your phone number.")
-    return int(data["borrower_id"])
+    return data
 
 
 # ---------------------------------------------------------------- one-time codes

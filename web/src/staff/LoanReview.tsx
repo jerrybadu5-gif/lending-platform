@@ -118,7 +118,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
   const reject = useMutation({ mutationFn: () => api.staff.reject(loan.id, note), onSuccess: done })
   const disburse = useMutation({ mutationFn: () => api.staff.disburse(loan.id), onSuccess: done })
   const reassess = useMutation({ mutationFn: () => api.staff.assess(loan.id), onSuccess: (d) => qc.setQueryData(['loan', loan.id], d) })
-  const error = approve.error ?? reject.error ?? disburse.error
+  const error = approve.error ?? reject.error ?? disburse.error ?? reassess.error
   const amountError = parseKina(amount) === null ? 'Enter an amount like 13,000.00' : undefined
 
   return (

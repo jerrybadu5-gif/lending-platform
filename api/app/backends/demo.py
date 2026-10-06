@@ -10,6 +10,7 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import cast
 
 from ..domain.models import (
     ActionResult,
@@ -20,8 +21,10 @@ from ..domain.models import (
     CollectionItem,
     Dashboard,
     Installment,
+    InterestMethod,
     LoanDetail,
     LoanEvent,
+    LoanState,
     LoanSummary,
     Payment,
     PortalApplicationIn,
@@ -275,7 +278,7 @@ class DemoBackend:
             principal=loan.principal,
             annual_rate=loan.rate,
             term_months=loan.months,
-            state=state,
+            state=cast(LoanState, state),
             days_overdue=days,
             outstanding=sum((i.total - i.paid for i in unpaid), ZERO),
             overdue_amount=sum((i.total - i.paid for i in overdue), ZERO),
@@ -360,7 +363,7 @@ class DemoBackend:
         inst = self._installments(loan, today)
         return LoanDetail(
             **s.model_dump(),
-            interest_method=loan.method,
+            interest_method=cast(InterestMethod, loan.method),
             borrower=self.borrowers[loan.borrower_id],
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),

@@ -20,7 +20,7 @@ from ..domain.models import (
     RepaymentIn,
     StaffUser,
 )
-from ..security import STAFF_COOKIE, StaffSession, clear_session, set_session, staff_session
+from ..security import STAFF_COOKIE, StaffSession, end_session, staff_session, start_session
 from ..underwriting import assess_loan
 
 router = APIRouter(prefix="/api/staff", tags=["staff"])
@@ -41,18 +41,18 @@ def _require_approver(s: StaffSession) -> None:
 async def login(body: LoginIn, request: Request, response: Response, svc: Services = Depends(services)):
     svc.login_limit.check(f"{request.client.host if request.client else '-'}:{body.username.lower()}")
     user, cred = await svc.backend.authenticate(body.username, body.password)
-    set_session(
+    start_session(
         response,
-        svc.settings,
+        svc,
         STAFF_COOKIE,
-        {"username": user.username, "display_name": user.display_name, "roles": user.roles, "cred": cred},
+        StaffSession(username=user.username, display_name=user.display_name, roles=user.roles, cred=cred),
     )
     return user
 
 
 @router.post("/logout", status_code=204)
-async def logout(response: Response) -> None:
-    clear_session(response, STAFF_COOKIE)
+async def logout(request: Request, response: Response, svc: Services = Depends(services)) -> None:
+    end_session(request, response, svc, STAFF_COOKIE)
 
 
 @router.get("/me", response_model=StaffUser)
@@ -114,6 +114,8 @@ async def reject(
 ):
     _require_approver(s)
     result = await svc.backend.reject(s.cred, loan_id, body, svc.today())
+    if result.state != "REJECTED":  # waiting for a second approver (maker-checker): tell no one yet
+        return result
     detail = await svc.backend.get_loan(s.cred, loan_id, svc.today())
     if detail.borrower.phone:
         await svc.sms.send(

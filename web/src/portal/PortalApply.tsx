@@ -70,6 +70,11 @@ export default function PortalApply() {
             <span className="font-display text-[32px] leading-[38px] font-semibold text-brand tabular-nums">{formatKina(quote.data.monthly_payment)}</span>
             <span className="text-[13px] leading-[18px]">{months} payments. You pay back about {formatKina(quote.data.total_repayable)}, of which {formatKina(quote.data.total_interest)} is interest.</span>
           </>
+        ) : quote.isError ? (
+          <div className="flex flex-col items-start gap-2" role="alert">
+            <span className="text-[13px] leading-[18px]">We couldn't work out the payment just now.</span>
+            <Button variant="secondary" onClick={() => quote.refetch()}>Try again</Button>
+          </div>
         ) : <Skeleton h={60} />}
       </section>
 
@@ -83,7 +88,7 @@ export default function PortalApply() {
       </section>
 
       {send.error && <div className="ml-alert ml-alert-danger" role="alert">{(send.error as Error).message}</div>}
-      <Button variant="primary" className="justify-center" style={{ height: 48 }} disabled={send.isPending}
+      <Button variant="primary" className="justify-center" style={{ height: 48 }} disabled={send.isPending || !quote.data}
         onClick={() => { setTouched(true); if (!incomeError && !debtError) send.mutate() }}>
         {send.isPending ? 'Sending…' : 'Send application'}
       </Button>

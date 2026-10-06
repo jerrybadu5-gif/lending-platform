@@ -43,7 +43,7 @@ services:
       postgresql:
         condition: service_healthy
     ports:
-      - "${FINERACT_PORT:-8080}:8080"
+      - "${FINERACT_BIND:-127.0.0.1}:${FINERACT_PORT:-8080}:8080"  # this PC only; McLender reaches it inside Docker
     environment:
       TZ: ${TIMEZONE}
       FINERACT_NODE_ID: "1"
@@ -75,7 +75,7 @@ services:
     depends_on:
       - fineract-server
     ports:
-      - "${WEB_APP_PORT:-80}:80"
+      - "${MIFOS_BIND:-127.0.0.1}:${WEB_APP_PORT:-80}:80"
     environment:
       # This URL is called from the user's browser, so it must be reachable from staff PCs
       FINERACT_API_URLS: ${PUBLIC_API_URL}
@@ -121,8 +121,9 @@ services:
       SITE_ADDRESS: ${MCLENDER_SITE_ADDRESS:-:80}
       API_UPSTREAM: mclender-api:8000
     ports:
-      - "${MCLENDER_PORT:-8088}:80"
-      - "${MCLENDER_TLS_PORT:-8443}:443"
+      # McLender is the way in for staff and borrowers, so it listens on the network by default.
+      - "${MCLENDER_BIND:-0.0.0.0}:${MCLENDER_PORT:-8088}:80"
+      - "${MCLENDER_BIND:-0.0.0.0}:${MCLENDER_TLS_PORT:-8443}:443"
     volumes:
       - caddy_data:/data
 

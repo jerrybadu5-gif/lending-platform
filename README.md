@@ -52,7 +52,7 @@ Sample data resets every time the API restarts.
 
 1. Follow [deploy/](deploy/) and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) to start Fineract and set up the products, chart of accounts and payment types (`Cash`, `Bank Transfer`, `Mobile Money`, `Payroll Deduction`).
 2. Run `python underwriting/bootstrap.py --gate` once to create the data tables McLender uses.
-3. In Mifos X, create a user `portal` with a role that can only read clients and loans, create loans, and read and write data tables.
+3. In Mifos X, create a user `portal` with a role that has only: read client, read client identifier, read loan, read loan product, create loan, and read/create/update on the two data tables (the list is at the top of `api/app/backends/fineract.py`).
 4. In `deploy/.env`, set `MCL_BACKEND=fineract`, `MCL_SESSION_SECRET`, `MCL_FINERACT_PORTAL_USER` and `MCL_FINERACT_PORTAL_PASSWORD`, then run `docker compose up -d --build`.
 5. Open http://localhost:8088/staff and sign in with a Fineract username and password.
 
@@ -60,8 +60,8 @@ Sample data resets every time the API restarts.
 
 | | Command | Status |
 |---|---|---|
-| API | `cd api && ruff check app tests && mypy app && pytest` | 51 tests pass |
-| Web | `cd web && npm run lint && npm run typecheck && npm test && npm run build` | 9 unit tests pass |
+| API | `cd api && ruff check app tests && mypy app && pytest` | 57 tests pass |
+| Web | `cd web && npm run lint && npm run typecheck && npm test && npm run build` | 12 unit tests pass |
 | End to end | `cd web && npm run build && npm run e2e` | 5 browser tests pass (staff on desktop, portal on a phone) |
 | CI | `.github/workflows/ci.yml` runs all of the above, plus dependency audits and Docker builds, on every pull request | |
 

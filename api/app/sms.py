@@ -13,18 +13,29 @@ class SmsSender(Protocol):
     async def send(self, to: str, text: str) -> None: ...
 
 
-class ConsoleSms:
-    """Development sender: writes the message to the log and keeps the last few for tests."""
+def mask_phone(to: str) -> str:
+    return "*" * max(len(to) - 3, 0) + to[-3:]
 
-    def __init__(self) -> None:
+
+class ConsoleSms:
+    """Development sender: writes the message to the log and keeps the last few for tests.
+
+    With reveal=False (anything but sample data) the log shows only a masked number and the
+    message length, so sign-in codes and borrower details never land in log files."""
+
+    def __init__(self, reveal: bool = True) -> None:
+        self.reveal = reveal
         self.sent: list[tuple[str, str]] = []
 
     async def send(self, to: str, text: str) -> None:
         self.sent = (self.sent + [(to, text)])[-50:]
-        log.info("SMS to %s: %s", to, text)
+        if self.reveal:
+            log.info("SMS to %s: %s", to, text)
+        else:
+            log.info("SMS to %s (%d characters, not shown)", mask_phone(to), len(text))
 
 
-def make_sms(provider: str) -> SmsSender:
+def make_sms(provider: str, reveal: bool = False) -> SmsSender:
     if provider == "console":
-        return ConsoleSms()
+        return ConsoleSms(reveal=reveal)
     raise ValueError(f"Unknown SMS provider {provider!r}")

@@ -12,6 +12,7 @@ LoanState = Literal[
     "PENDING", "APPROVED", "REJECTED", "ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED", "WRITTEN_OFF", "WITHDRAWN"
 ]
 Recommendation = Literal["APPROVE", "REFER", "DECLINE"]
+InterestMethod = Literal["DECLINING_BALANCE", "FLAT"]
 PaymentMethod = Literal["cash", "bank", "mobile", "payroll"]
 
 
@@ -92,7 +93,8 @@ class LoanEvent(BaseModel):
 
 
 class LoanDetail(LoanSummary):
-    interest_method: Literal["DECLINING_BALANCE", "FLAT"] = "DECLINING_BALANCE"
+    interest_method: InterestMethod = "DECLINING_BALANCE"
+    repayments_per_year: Decimal = Decimal(12)  # 12 monthly, 26 fortnightly, 52 weekly
     borrower: Borrower
     schedule: list[Installment] = []
     total_interest: Decimal = Decimal("0")

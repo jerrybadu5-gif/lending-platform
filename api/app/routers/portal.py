@@ -19,7 +19,7 @@ from ..domain.models import (
     Quote,
     QuoteIn,
 )
-from ..security import PORTAL_COOKIE, clear_session, portal_session, set_session
+from ..security import PORTAL_COOKIE, PortalSession, end_session, portal_session, start_session
 from ..underwriting import assess_loan, quote
 
 router = APIRouter(prefix="/api/portal", tags=["portal"])
@@ -51,22 +51,21 @@ async def verify(body: OtpVerify, response: Response, svc: Services = Depends(se
     borrower = await svc.backend.find_borrower_by_phone(phone)
     if not borrower:
         raise HTTPException(401, "That code is wrong or has expired. Ask for a new code.")
-    set_session(response, svc.settings, PORTAL_COOKIE, {"borrower_id": borrower.id})
-    return {"first_name": borrower.name.split()[0]}
+    first_name = borrower.name.split()[0] if borrower.name.strip() else "there"
+    start_session(response, svc, PORTAL_COOKIE, PortalSession(borrower_id=borrower.id, first_name=first_name))
+    return {"first_name": first_name}
 
 
 @router.post("/logout", status_code=204)
-async def logout(response: Response) -> None:
-    clear_session(response, PORTAL_COOKIE)
+async def logout(request: Request, response: Response, svc: Services = Depends(services)) -> None:
+    end_session(request, response, svc, PORTAL_COOKIE)
 
 
 @router.get("/home", response_model=PortalHome)
-async def home(borrower_id: int = Depends(portal_session), svc: Services = Depends(services)):
+async def home(me: PortalSession = Depends(portal_session), svc: Services = Depends(services)):
     today = svc.today()
-    loans = await svc.backend.borrower_loans(borrower_id, today)
-    if not loans:
-        raise HTTPException(404, "We couldn't find your account. Please call us.")
-    name = loans[0].borrower.name.split()[0]
+    loans = await svc.backend.borrower_loans(me.borrower_id, today)
+    name = me.first_name  # a borrower with no loan yet still gets a home page and can apply
     live = [l for l in loans if l.state in ("ACTIVE", "ARREARS", "ARREARS_LATE")]
     if not live:
         return PortalHome(first_name=name, company_name=svc.settings.company_name, loan=None)
@@ -107,10 +106,10 @@ async def get_quote(body: QuoteIn):
 
 @router.post("/applications", response_model=PortalApplicationOut, status_code=201)
 async def apply(
-    body: PortalApplicationIn, borrower_id: int = Depends(portal_session), svc: Services = Depends(services)
+    body: PortalApplicationIn, me: PortalSession = Depends(portal_session), svc: Services = Depends(services)
 ):
     today = svc.today()
-    summary = await svc.backend.submit_application(borrower_id, body, today)
+    summary = await svc.backend.submit_application(me.borrower_id, body, today)
     detail = await svc.backend.get_loan("portal", summary.id, today)
     await svc.backend.save_assessment("portal", summary.id, assess_loan(detail, svc.policy, today))
     q = quote(body.amount, body.months, PORTAL_RATE)

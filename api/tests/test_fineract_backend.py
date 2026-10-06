@@ -14,9 +14,9 @@ import pytest
 import respx
 
 from app.backends.base import AuthFailed, BackendError
-from app.backends.fineract import FineractBackend, fdate
+from app.backends.fineract import FineractBackend, fdate, repayments_per_year
 from app.config import Settings
-from app.domain.models import ApproveIn, RepaymentIn
+from app.domain.models import ApproveIn, RejectIn, RepaymentIn
 
 BASE = "http://fin.test/fineract-provider/api/v1"
 TODAY = date(2026, 10, 6)
@@ -188,3 +188,25 @@ def test_find_borrower_by_phone_checks_exact_number(fb):
     assert b is not None and b.id == 8
     portal_auth = respx.calls[0].request.headers["Authorization"]
     assert portal_auth == "Basic cG9ydGFsOnB3"  # portal:pw, never a staff key
+
+
+@respx.mock
+def test_reject_waits_for_second_approver(fb):
+    respx.post(f"{BASE}/loans/536", params={"command": "reject"}).respond(200, json={"commandId": 92})
+    r = run(fb.reject("K", 536, RejectIn(note="Income not verified"), TODAY))
+    assert r.state == "PENDING" and "second approver" in r.message
+
+
+def test_repayment_frequency():
+    assert repayments_per_year({}) == 12
+    assert repayments_per_year({"repaymentFrequencyType": {"id": 1}, "repaymentEvery": 2}) == 26
+    assert repayments_per_year({"repaymentFrequencyType": {"id": 1}, "repaymentEvery": 1}) == 52
+    assert repayments_per_year({"repaymentFrequencyType": {"id": 2}, "repaymentEvery": 1}) == 12
+
+
+def test_console_sms_masks_outside_demo(caplog):
+    from app.sms import ConsoleSms
+
+    with caplog.at_level("INFO", logger="mclender.sms"):
+        run(ConsoleSms(reveal=False).send("70123344", "Your code is 123456"))
+    assert "123456" not in caplog.text and "70123344" not in caplog.text and "*****344" in caplog.text

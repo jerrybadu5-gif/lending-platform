@@ -11,7 +11,7 @@ from fastapi import Request
 from .backends.base import LendingBackend
 from .config import Settings
 from .domain.risk import Policy
-from .security import OtpStore, RateLimiter
+from .security import OtpStore, RateLimiter, SessionStore
 from .sms import SmsSender
 
 
@@ -24,6 +24,7 @@ class Services:
     policy: Policy
     login_limit: RateLimiter
     otp_limit: RateLimiter
+    sessions: SessionStore
 
     def today(self) -> date:
         return datetime.now(local_zone(self.settings.timezone)).date()

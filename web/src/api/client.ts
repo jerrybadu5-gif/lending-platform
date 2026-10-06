@@ -80,7 +80,13 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
     throw new ApiError(0, 'No connection. Check your internet and try again.')
   }
   if (res.status === 204) return undefined as T
-  const data = await res.json().catch(() => ({}))
+  let data: { detail?: unknown; fields?: { field: string; message: string }[] } & Record<string, unknown>
+  try {
+    data = await res.json()
+  } catch {
+    if (res.ok) throw new ApiError(res.status, 'The server sent an answer we could not read. Try again.')
+    data = {}
+  }
   if (!res.ok) {
     const detail = typeof data.detail === 'string' ? data.detail : 'Something went wrong. Try again.'
     throw new ApiError(res.status, detail, data.fields ?? [])

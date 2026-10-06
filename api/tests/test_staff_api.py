@@ -19,7 +19,16 @@ def test_session_cookie_is_httponly_and_strict(client):
     r = client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
     cookie = r.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=strict" in cookie
-    assert "demo:demo" not in r.headers["set-cookie"]  # credential is signed, not exposed raw... nor readable by JS
+    # The cookie carries only a signed random session id; the Fineract credential stays on the server.
+    assert "demo:demo" not in r.headers["set-cookie"]
+    assert "ZGVtbzpkZW1v" not in r.headers["set-cookie"]  # base64 of demo:demo
+
+
+def test_logout_ends_session_on_server(staff):
+    old = staff.cookies.get("mcl_staff")
+    assert staff.post("/api/staff/logout").status_code in (200, 204)
+    staff.cookies.set("mcl_staff", old)  # replaying the old cookie must not work
+    assert staff.get("/api/staff/me").status_code == 401
 
 
 def test_tampered_cookie_rejected(client):

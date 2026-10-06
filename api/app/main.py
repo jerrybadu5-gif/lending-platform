@@ -15,7 +15,7 @@ from .backends.base import BackendError, LendingBackend
 from .config import Settings, get_settings
 from .deps import Services
 from .routers import portal, staff
-from .security import OtpStore, RateLimiter
+from .security import OtpStore, RateLimiter, SessionStore
 from .sms import make_sms
 from .underwriting import load_policy
 
@@ -36,17 +36,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     if settings.backend == "fineract" and settings.session_secret == "dev-only-change-me":
         raise RuntimeError("Set MCL_SESSION_SECRET before using the Fineract back end.")
+    if settings.backend == "fineract" and not settings.cookie_secure:
+        logging.getLogger("mclender").warning(
+            "MCL_COOKIE_SECURE is off: sign-in cookies will also travel over plain HTTP. Turn it on behind HTTPS."
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         svc = Services(
             settings=settings,
             backend=None,  # type: ignore[arg-type]  # set just below, once today's date is known
-            sms=make_sms(settings.sms_provider),
+            sms=make_sms(settings.sms_provider, reveal=settings.backend == "demo"),
             otp=OtpStore(settings.otp_ttl_seconds, settings.otp_max_attempts),
             policy=load_policy(settings.policy_file),
             login_limit=RateLimiter(10, 300),
             otp_limit=RateLimiter(5, 900),
+            sessions=SessionStore(settings.session_hours),
         )
         svc.backend = make_backend(settings, svc.today())
         app.state.services = svc

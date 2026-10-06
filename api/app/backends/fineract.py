@@ -2,8 +2,10 @@
 
 Staff calls run with the signed-in staff member's own Fineract credential, so Fineract's
 roles, permissions and maker-checker rules still apply. Portal calls run with a technical
-user (MCL_FINERACT_PORTAL_USER) that should only have read-client, read-loan and
-create-loan permissions.
+user (MCL_FINERACT_PORTAL_USER). Give its role only these permissions:
+READ_CLIENT, READ_CLIENTIDENTIFIER (finding a borrower by phone uses client search),
+READ_LOAN, CREATE_LOAN, READ_LOANPRODUCT, and READ/CREATE/UPDATE on the data tables
+dt_borrower_financials and dt_loan_assessment.
 
 Borrower financials and assessments live in the data tables created by
 underwriting/bootstrap.py (dt_borrower_financials, dt_loan_assessment).
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import time
 from datetime import date, timedelta
 from decimal import Decimal
@@ -32,6 +35,7 @@ from ..domain.models import (
     Installment,
     LoanDetail,
     LoanEvent,
+    LoanState,
     LoanSummary,
     Payment,
     PortalApplicationIn,
@@ -46,7 +50,7 @@ ZERO = Decimal("0")
 BORROWER_TABLE = "dt_borrower_financials"
 ASSESSMENT_TABLE = "dt_loan_assessment"
 DATE_FMT = {"locale": "en", "dateFormat": "yyyy-MM-dd"}
-STATUS = {
+STATUS: dict[int, LoanState] = {
     100: "PENDING",
     200: "APPROVED",
     300: "ACTIVE",
@@ -67,6 +71,24 @@ def fdate(v: Any) -> date | None:
     if isinstance(v, list | tuple):
         return date(int(v[0]), int(v[1]), int(v[2]))
     return date.fromisoformat(str(v)[:10])
+
+
+def req_date(v: Any, what: str) -> date:
+    """A date Fineract must always send; a missing one means the response is not what we expect."""
+    d = fdate(v)
+    if d is None:
+        raise BackendError(f"Fineract sent a {what} without a date.")
+    return d
+
+
+# repaymentFrequencyType id -> repayments per year when repaymentEvery is 1
+FREQUENCY_PER_YEAR = {0: Decimal(365), 1: Decimal(52), 2: Decimal(12), 3: Decimal(1)}
+
+
+def repayments_per_year(raw: dict) -> Decimal:
+    ftype = int((raw.get("repaymentFrequencyType") or {}).get("id", 2))
+    every = max(int(raw.get("repaymentEvery") or 1), 1)
+    return FREQUENCY_PER_YEAR.get(ftype, Decimal(12)) / every
 
 
 def dec(v: Any) -> Decimal:
@@ -142,7 +164,7 @@ class FineractBackend:
 
     # ----------------------------------------------------------- mapping
     @staticmethod
-    def _state(raw: dict, days: int) -> str:
+    def _state(raw: dict, days: int) -> LoanState:
         state = STATUS.get(int(raw.get("status", {}).get("id", 0)), "PENDING")
         if state == "ACTIVE" and days > 0:
             return "ARREARS_LATE" if days > 30 else "ARREARS"
@@ -228,10 +250,10 @@ class FineractBackend:
         out = [self._summary(r, today) for r in raws]
         if states:
             out = [s for s in out if s.state in states]
-        if states == {"PENDING"}:  # show the recommendation in the approvals list
-            for s in out:
-                a = await self._datatable(cred, ASSESSMENT_TABLE, s.id)
-                s.recommendation = (a or {}).get("recommendation")
+        pending = [s for s in out if s.state == "PENDING"]  # show the recommendation in the approvals list
+        found = await asyncio.gather(*(self._datatable(cred, ASSESSMENT_TABLE, s.id) for s in pending))
+        for s, a in zip(pending, found, strict=True):
+            s.recommendation = (a or {}).get("recommendation")
         return out
 
     async def _schedule(self, cred: str, loan_id: int) -> tuple[dict, list[Installment]]:
@@ -244,7 +266,7 @@ class FineractBackend:
             inst.append(
                 Installment(
                     number=int(p["period"]),
-                    due_date=fdate(p["dueDate"]),
+                    due_date=req_date(p.get("dueDate"), "repayment schedule line"),
                     principal=dec(p.get("principalDue") or p.get("principalOriginalDue")),
                     interest=dec(p.get("interestDue")),
                     fees=dec(p.get("feeChargesDue")) + dec(p.get("penaltyChargesDue")),
@@ -308,7 +330,7 @@ class FineractBackend:
         history = [LoanEvent(when=fdate(d).isoformat(), text=t, who=w) for d, t, w in events if fdate(d)]  # type: ignore[union-attr]
         payments = [
             Payment(
-                paid_on=fdate(t["date"]),
+                paid_on=req_date(t.get("date"), "repayment"),
                 amount=dec(t.get("amount")),
                 method=((t.get("paymentDetailData") or {}).get("paymentType") or {}).get("name", "Repayment"),
             )
@@ -320,6 +342,7 @@ class FineractBackend:
             next_due_date=nxt.due_date if nxt else None,
             next_due_amount=(nxt.total - nxt.paid) if nxt else None,
             interest_method="FLAT" if (raw.get("interestType") or {}).get("id") == 1 else "DECLINING_BALANCE",
+            repayments_per_year=repayments_per_year(raw),
             borrower=borrower,
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),
@@ -373,12 +396,16 @@ class FineractBackend:
         return ActionResult(loan_id=loan_id, state="APPROVED", message=f"Loan approved for K {body.amount:,.2f}.")
 
     async def reject(self, cred: str, loan_id: int, body: RejectIn, today: date) -> ActionResult:
-        await self._post(
+        result = await self._post(
             cred,
             f"/loans/{loan_id}?command=reject",
             {**DATE_FMT, "rejectedOnDate": today.isoformat(), "note": body.note},
         )
         self._invalidate()
+        if self._pending_checker(result):
+            return ActionResult(
+                loan_id=loan_id, state="PENDING", message="Rejection saved. A second approver must confirm it."
+            )
         return ActionResult(loan_id=loan_id, state="REJECTED", message="Application rejected.")
 
     async def disburse(self, cred: str, loan_id: int, today: date) -> ActionResult:
@@ -397,7 +424,9 @@ class FineractBackend:
             live = [r for r in await self._all_loans(cred) if int(r.get("status", {}).get("id", 0)) == 300]
             return await asyncio.gather(*(self._schedule(cred, int(r["id"])) for r in live))
 
-        return await self._cached(f"live:{cred[:12]}:{today}", 60, build)
+        # Key by a hash of the whole credential: a prefix of it could be shared by two users.
+        who = hashlib.sha256(cred.encode()).hexdigest()
+        return await self._cached(f"live:{who}:{today}", 60, build)
 
     async def dashboard(self, cred: str, today: date) -> Dashboard:
         raws = await self._all_loans(cred)
