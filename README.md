@@ -26,6 +26,10 @@ lending-platform/
 
 You need Python 3.12+ and Node 22+.
 
+**On Windows:** open PowerShell in this folder and run `powershell -ExecutionPolicy Bypass -File .\start-demo.ps1`. It installs what's needed, starts McLender and opens the browser. Then follow the checklist in [docs/TESTING.md](docs/TESTING.md).
+
+**By hand (any system):**
+
 ```bash
 # 1. API with sample data
 cd api
