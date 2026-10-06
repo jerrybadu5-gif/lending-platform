@@ -1,7 +1,26 @@
+# Dependency updates: one grouped pull request per ecosystem each week for minor and patch versions.
+# Major versions (breaking changes) are left for a person to plan, so they don't flood the PR list.
 version: 2
 updates:
-  - { package-ecosystem: pip, directory: /api, schedule: { interval: weekly } }
-  - { package-ecosystem: npm, directory: /web, schedule: { interval: weekly }, open-pull-requests-limit: 5 }
-  - { package-ecosystem: docker, directory: /api, schedule: { interval: weekly } }
-  - { package-ecosystem: docker, directory: /web, schedule: { interval: weekly } }
-  - { package-ecosystem: github-actions, directory: /, schedule: { interval: monthly } }
+  - package-ecosystem: pip
+    directory: /api
+    target-branch: main
+    schedule: { interval: weekly }
+    groups: { python: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: npm
+    directory: /web
+    target-branch: main
+    schedule: { interval: weekly }
+    groups: { web: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: docker
+    directories: [/api, /web]
+    target-branch: main
+    schedule: { interval: monthly }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: main
+    schedule: { interval: monthly }
+    groups: { actions: { patterns: ["*"] } }
