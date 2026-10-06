@@ -2,7 +2,7 @@
 # (plus the Mifos X admin web app). Single-server deployment.
 # Based on github.com/openMF/mifosx-platform (postgresql/), trimmed for one office:
 #   - no ActiveMQ / worker nodes (not needed below ~50 concurrent users)
-#   - database port bound to localhost only
+#   - database not reachable from outside Docker
 #   - named volume for data, healthchecks, pinned-able image tags via .env
 #
 # Start:   docker compose --env-file .env up -d
@@ -28,8 +28,8 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
       - ./backups:/backups
-    ports:
-      - "127.0.0.1:5432:5432"
+    # No ports: only Fineract (inside Docker) talks to the database. Backups use `docker compose exec`.
+    # For a database tool on this PC, add:  ports: ["127.0.0.1:55432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -q -U ${POSTGRES_USER} -d postgres"]
       interval: 10s
