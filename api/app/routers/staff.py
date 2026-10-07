@@ -256,6 +256,8 @@ async def disburse(
 ):
     _require_approver(s)
     loan = await _require_kyc(svc, s.cred, loan_id)
+    if loan.state != "APPROVED":
+        raise HTTPException(409, "Only an approved loan can be paid out.")
     payout = await payout_status(svc, s.cred, loan_id, loan)
     if payout.missing:
         raise HTTPException(409, " ".join(payout.missing))

@@ -21,9 +21,10 @@ const EMPTY: Form = {
 const BANKS = ['BSP', 'Kina Bank', 'Westpac', 'ANZ', 'TISA Bank', 'Nationwide Microbank', 'Women’s Micro Bank']
 
 function fromBorrower(b: Borrower): Form {
+  // Use the stored first and last names; split the display name only for an old record without them.
   const [first, ...rest] = b.name.split(' ')
   return {
-    first_name: first ?? '', last_name: rest.join(' '), phone: b.phone ?? '', date_of_birth: b.date_of_birth ?? '',
+    first_name: b.first_name ?? first ?? '', last_name: b.last_name ?? rest.join(' '), phone: b.phone ?? '', date_of_birth: b.date_of_birth ?? '',
     gender: b.gender ?? '', address: b.address ?? '', national_id: b.national_id ?? '', employer: b.employer ?? '',
     payroll_number: b.payroll_number ?? '',
     monthly_income: b.monthly_income ? formatKina(b.monthly_income, { currency: false }) : '',

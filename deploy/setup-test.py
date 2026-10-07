@@ -95,9 +95,14 @@ def new_password() -> str:
 
 def set_env_value(key: str, value: str) -> None:
     path = ROOT / "deploy" / ".env"
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    found = any(line.startswith(f"{key}=") for line in lines)
     lines = [f"{key}={value}" if line.startswith(f"{key}=") else line for line in lines]
+    if not found:
+        lines.append(f"{key}={value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if read_env().get(key) != value:  # the API must read exactly what Fineract is given
+        sys.exit(f"Could not save {key} in {path}. Set it by hand and run this again.")
 
 
 def step(msg: str) -> None:
@@ -238,12 +243,14 @@ def main() -> None:
     start = TODAY - timedelta(days=75)
 
     def borrower(first, last, phone, income, debt, score):
+        """The client's id, created if missing. An existing client is reused, so a run that stopped
+        half-way is finished by the next one (see the loan steps below)."""
         hits = f.get(f"/search?query={phone}&resource=clients&exactMatch=false")
         for h in hits or []:
             c = f.get(f"/clients/{h['entityId']}")
             if (c.get("mobileNo") or "").endswith(phone):
                 print(f"= {first} {last}")
-                return None
+                return int(c["id"])
         cid = f.post("/clients", {
             **DF, "officeId": 1, "legalFormId": 1, "firstname": first, "lastname": last, "mobileNo": phone,
             "active": True, "activationDate": start.isoformat(), "submittedOnDate": start.isoformat(),
@@ -268,27 +275,48 @@ def main() -> None:
             "expectedDisbursementDate": on.isoformat(), "submittedOnDate": on.isoformat(),
         })["loanId"]
 
+    def first_loan(cid):
+        """(loan id, Fineract status id) of the client's test loan, or (None, None)."""
+        loans = (f.get(f"/clients/{cid}/accounts") or {}).get("loanAccounts") or []
+        if not loans:
+            return None, None
+        loan = min(loans, key=lambda lo: int(lo["id"]))
+        return int(loan["id"]), int((loan.get("status") or {}).get("id") or 0)
+
+    # Mary: applied, approved, paid out and one repayment made. Each step is done only if still missing.
     mary = borrower("Mary", "Kila", "70123344", 4200, 300, 720)
-    if mary:
-        on = start + timedelta(days=5)
-        loan = apply(mary, 5000, 12, on)
+    on = start + timedelta(days=5)
+    loan, status = first_loan(mary)
+    if loan is None:
+        loan, status = apply(mary, 5000, 12, on), 100
+        print("  + applied for K 5,000")
+    if status == 100:
         f.post(f"/loans/{loan}?command=approve", {**DF, "approvedOnDate": on.isoformat(), "approvedLoanAmount": 5000,
                                                   "expectedDisbursementDate": on.isoformat()})
+        status = 200
+        print("  + approved")
+    if status == 200:
         f.post(f"/loans/{loan}?command=disburse", {**DF, "actualDisbursementDate": on.isoformat()})
-        paid = on + timedelta(days=30)
-        f.post(f"/loans/{loan}/transactions?command=repayment", {
-            **DF, "transactionDate": paid.isoformat(), "transactionAmount": 472.80,
-            "paymentTypeId": have["mobile money"], "receiptNumber": "TEST-0001",
-        })
-        print(f"  + K 5,000 loan disbursed {on:%d/%m/%Y}, one payment made")
-    peter = borrower("Peter", "Wambi", "71234567", 3500, 900, 610)
-    if peter:
-        apply(peter, 15000, 24, TODAY - timedelta(days=1))
-        print("  + applied for K 15,000 over 24 months")
-    joyce = borrower("Joyce", "Ilave", "72345678", 1800, 700, 520)
-    if joyce:
-        apply(joyce, 8000, 12, TODAY - timedelta(days=1))
-        print("  + applied for K 8,000 over 12 months")
+        status = 300
+        print(f"  + disbursed {on:%d/%m/%Y}")
+    if status == 300:
+        txns = (f.get(f"/loans/{loan}?associations=transactions") or {}).get("transactions") or []
+        if not any((t.get("type") or {}).get("repayment") for t in txns):
+            paid = on + timedelta(days=30)
+            f.post(f"/loans/{loan}/transactions?command=repayment", {
+                **DF, "transactionDate": paid.isoformat(), "transactionAmount": 472.80,
+                "paymentTypeId": have["mobile money"], "receiptNumber": "TEST-0001",
+            })
+            print("  + one payment made")
+
+    for first, last, phone, income, debt, score, amount, months in [
+        ("Peter", "Wambi", "71234567", 3500, 900, 610, 15000, 24),
+        ("Joyce", "Ilave", "72345678", 1800, 700, 520, 8000, 12),
+    ]:
+        cid = borrower(first, last, phone, income, debt, score)
+        if first_loan(cid)[0] is None:
+            apply(cid, amount, months, TODAY - timedelta(days=1))
+            print(f"  + applied for K {amount:,} over {months} months")
 
     print("\nDone. Passwords are shown only when a user is created (or with --new-passwords).")
 

@@ -54,6 +54,8 @@ class BankAccount(BaseModel):
 class Borrower(BaseModel):
     id: int
     name: str
+    first_name: str | None = None  # as stored, so editing never re-splits the display name
+    last_name: str | None = None
     phone: str | None = None
     national_id: str | None = None
     employer: str | None = None

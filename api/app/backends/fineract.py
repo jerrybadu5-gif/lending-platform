@@ -318,9 +318,7 @@ class FineractBackend:
             try:
                 await self._get(cred, f"/datatables/{REVIEW_TABLE}")
                 return True
-            except AuthFailed:
-                raise
-            except BackendError as e:
+            except NotFound as e:  # only a real 404; anything else (session ended, 502) isn't cached
                 log.error("%s isn't set up in Fineract (run underwriting/bootstrap.py): %s", REVIEW_TABLE, e.message)
                 return False
 
@@ -333,9 +331,9 @@ class FineractBackend:
             return None
         try:
             row = await self._datatable(cred, REVIEW_TABLE, loan_id)
-        except AuthFailed:
-            raise
         except BackendError as e:
+            if isinstance(e, AuthFailed) or e.status == 401:  # the staff session ended: say so, don't hide it
+                raise
             log.warning("Could not read %s for loan %s: %s", REVIEW_TABLE, loan_id, e.message)
             return None
         if not row or row.get("stage") not in ("DRAFT", "SUBMITTED", "RETURNED"):
@@ -783,7 +781,6 @@ class FineractBackend:
         )
         fin, prof = fin or {}, prof or {}
         nid = next((i for i in ids or [] if _is_nid((i.get("documentType") or {}).get("name", ""))), None)
-        nid = nid or (ids[0] if ids else None)
         gender = ((client.get("gender") or {}).get("name") or "").strip().lower()
         bank = None
         if prof.get("bank_name") and prof.get("bank_account_number"):
@@ -801,6 +798,8 @@ class FineractBackend:
         return Borrower(
             id=client_id,
             name=client.get("displayName", ""),
+            first_name=client.get("firstname"),
+            last_name=client.get("lastname"),
             phone=normalise_phone(client.get("mobileNo") or "") or None,
             national_id=nid.get("documentKey") if nid else None,
             employer=prof.get("employer") or fin.get("income_source"),
@@ -946,9 +945,11 @@ class FineractBackend:
                 )
         if body.national_id:
             key = _nid_key(body.national_id)
-            hits = await self._get(
-                cred, f"/search?query={quote(body.national_id)}&resource=clientIdentifiers&exactMatch=false"
-            )
+            # Search by one group as Fineract may have stored it ("2009 1182 4410", "2009-1182-4410"),
+            # then compare the normalised numbers.
+            groups = re.findall(r"[0-9A-Za-z]+", body.national_id)
+            probe = max(groups, key=len) if groups else body.national_id
+            hits = await self._get(cred, f"/search?query={quote(probe)}&resource=clientIdentifiers&exactMatch=false")
             for h in hits or []:
                 owner = int(h.get("parentId") or 0)
                 if owner and owner != except_id and _nid_key(h.get("entityName") or "") == key:

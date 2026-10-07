@@ -79,3 +79,10 @@ def test_assess_pending_writes_assessment_then_updates():
     row = calls[0][2]
     assert row["recommendation"] == "APPROVE" and row["dti"] == "0.3437" and row["locale"] == "en"
     assert "dscr" not in row  # None values are not sent
+
+
+def test_odd_error_bodies_keep_a_readable_message():
+    from fineract import FineractError
+
+    assert "HTTP 400" in str(FineractError(400, '{"errors": 1}'))
+    assert "bad" in str(FineractError(400, '{"defaultUserMessage": "bad", "errors": [{"parameterName": "x"}]}'))

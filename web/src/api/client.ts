@@ -23,7 +23,8 @@ export interface StaffUser { username: string; display_name: string; roles: stri
 export interface BankAccount { bank: string; branch: string | null; account_name: string; account_number: string }
 export interface NextOfKin { name: string; relationship: string; phone: string }
 export interface Borrower {
-  id: number; name: string; phone: string | null; national_id: string | null; employer: string | null
+  id: number; name: string; first_name?: string | null; last_name?: string | null
+  phone: string | null; national_id: string | null; employer: string | null
   address: string | null; monthly_income: Money | null; existing_monthly_debt: Money | null
   credit_score: number | null; monthly_business_noi: Money | null; income_verified: boolean | null
   has_photo?: boolean

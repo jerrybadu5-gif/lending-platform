@@ -22,10 +22,12 @@ class FineractError(RuntimeError):
         try:
             data = json.loads(body)
             errors = data.get("errors") or []
+            if not isinstance(errors, list):
+                return body[:1000]
             lines = [f"{e.get('parameterName') or '-'}: {e.get('defaultUserMessage') or e.get('developerMessage')}"
                      for e in errors]
             return "\n  ".join([data.get("defaultUserMessage", "")] + lines) if lines else body[:1000]
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, TypeError):
             return body[:1000]
 
 

@@ -106,7 +106,13 @@ def test_get_loan_maps_everything(fb):
     respx.get(f"{BASE}/clients/8").respond(
         200, json={"id": 8, "displayName": "Peter Wambi", "mobileNo": "+675 7123 4567"}
     )
-    respx.get(f"{BASE}/clients/8/identifiers").respond(200, json=[{"documentKey": "2011 0488 7712"}])
+    respx.get(f"{BASE}/clients/8/identifiers").respond(
+        200,
+        json=[
+            {"documentType": {"name": "Passport"}, "documentKey": "P1234567"},
+            {"documentType": {"name": "National ID (NID)"}, "documentKey": "2011 0488 7712"},
+        ],
+    )
     respx.get(f"{BASE}/datatables/dt_borrower_financials/8").respond(
         200,
         json=[
@@ -628,3 +634,37 @@ def test_client_photo_is_saved_and_read_back(fb):
 def test_no_client_photo(fb):
     respx.get(f"{BASE}/clients/8/images").respond(404, json={})
     assert run(fb.get_photo("K", 8)) is None
+
+
+@respx.mock
+def test_review_table_check_does_not_cache_other_errors(fb):
+    table = respx.get(f"{BASE}/datatables/dt_loan_review")
+    table.respond(502, json={"defaultUserMessage": "gateway"})
+    with pytest.raises(BackendError):
+        run(fb._review("K", 536))
+    table.respond(200, json={})
+    respx.get(f"{BASE}/datatables/dt_loan_review/536").respond(200, json=[])
+    assert run(fb._review("K", 536)).stage == "DRAFT"  # the 502 wasn't remembered as "missing"
+
+
+@respx.mock
+def test_duplicate_nid_found_however_it_was_stored(fb):
+    from app.domain.models import BorrowerIn
+
+    respx.get(f"{BASE}/search", params={"resource": "clients"}).respond(200, json=[])
+    nid = respx.get(f"{BASE}/search", params={"resource": "clientIdentifiers"}).respond(
+        200, json=[{"entityName": "2009-1182-4410", "parentId": 1, "parentName": "Mary Kila"}]
+    )
+    body = BorrowerIn(
+        first_name="Kila",
+        last_name="Morea",
+        phone="75551212",
+        date_of_birth=date(1990, 4, 12),
+        gender="female",
+        address="Tokarara",
+        national_id="2009 1182 4410",
+        existing_monthly_debt=D("0"),
+    )
+    with pytest.raises(BackendError, match="Mary Kila"):
+        run(fb._check_unique("K", body))
+    assert nid.calls[0].request.url.params["query"] == "2009"

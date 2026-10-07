@@ -68,7 +68,7 @@ test('record a mobile money repayment', async ({ page }) => {
   await expect(page.getByText('Repayment recorded')).toBeVisible()
   await expect(page.getByText(/Sent to 70123344/)).toBeVisible()
   // The receipt stays on screen after Mary drops off the "due today" list, and is listed below.
-  await page.waitForTimeout(500)
+  await expect(page.getByRole('region', { name: 'Loans' }).getByRole('button', { name: 'Mary Kila' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Print receipt (PDF)' })).toBeVisible()
   const listed = page.getByRole('region', { name: 'Receipts recorded' })
   await expect(listed.getByText('Mary Kila')).toBeVisible()

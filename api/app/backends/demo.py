@@ -689,6 +689,7 @@ class DemoBackend:
     @staticmethod
     def _apply(b: Borrower, body: BorrowerIn) -> None:
         b.name = body.name
+        b.first_name, b.last_name = body.first_name, body.last_name
         b.phone = normalise_phone(body.phone)
         b.date_of_birth, b.gender, b.address = body.date_of_birth, body.gender, body.address
         b.national_id, b.employer, b.payroll_number = body.national_id, body.employer, body.payroll_number

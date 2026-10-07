@@ -51,6 +51,13 @@ cd ..
 api\.venv\Scripts\python.exe deploy\setup-test.py
 ```
 
+The script needs only Python 3.10 or newer, no extra packages. If `api\.venv` doesn't exist yet on this PC,
+create it once first (or run the script with any Python you have: `py deploy\setup-test.py`):
+
+```powershell
+py -m venv api\.venv
+```
+
 This creates the data tables, PGK, payment types, a Personal loan product, the roles, the users `grace`
 (credit manager), `john` (loan officer) and `portal`, and three test borrowers. **Write down the logins
 it prints at the end; they're shown once.** If it stops with "Fineract refused a step", copy the message to

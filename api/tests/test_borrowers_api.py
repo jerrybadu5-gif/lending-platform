@@ -46,7 +46,7 @@ def test_create_borrower_and_profile(staff):
 
 
 def test_create_validation(staff):
-    under_18 = date.today().replace(year=date.today().year - 16).isoformat()
+    under_18 = date(date.today().year - 16, 1, 1).isoformat()  # never 29 February
     r = staff.post("/api/staff/borrowers", json={**NEW, "date_of_birth": under_18})
     assert r.status_code == 422 and "18" in r.text
     r = staff.post("/api/staff/borrowers", json={**NEW, "bank": {**NEW["bank"], "account_number": "abc"}})

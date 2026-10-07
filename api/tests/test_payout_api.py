@@ -185,3 +185,9 @@ def test_signed_agreement_stays_once_payout_is_waiting_for_a_checker(staff):
     asyncio.run(run_note)
     r = staff.post(f"/api/staff/loans/536/documents/{up['id']}/remove", json={"reason": "wrong"})
     assert r.status_code == 409
+
+
+def test_only_an_approved_loan_is_paid_out(staff):
+    staff.app.state.services.settings.signed_agreement_required = False
+    r = staff.post("/api/staff/loans/533/disburse", json={"method": "cash", "reference": "CV-1"})
+    assert r.status_code == 409 and "approved" in r.json()["detail"]
