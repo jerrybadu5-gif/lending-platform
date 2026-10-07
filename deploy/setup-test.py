@@ -23,6 +23,7 @@ TEST DATA ONLY. Do not run this against the live Breez Lending server.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import sys
 from datetime import date, timedelta
@@ -63,7 +64,7 @@ ROLES = {
 }
 
 
-SPECIALS = "!@#%*-_+=?"
+SPECIALS = "!@%*-_+=?"  # no #, $ or quotes: they mean something in .env files
 
 
 def strong(pw: str) -> bool:
@@ -106,7 +107,8 @@ def read_env() -> dict[str, str]:
         for line in path.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.split("#", 1)[0].strip().strip('"').strip("'")
+                # Like Docker Compose: " #" starts a comment, but a # inside a value (a password) is kept.
+                env[k.strip()] = re.split(r"\s+#", v, maxsplit=1)[0].strip().strip('"').strip("'")
     return env
 
 
