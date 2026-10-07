@@ -92,9 +92,16 @@ Tick each one. If something is wrong, note the screen, what you did and what you
 - [ ] Approve is greyed out, with "Documents still needed before approval". Follow the link to his profile
       and upload the four documents (any PDF or phone photo will do for a test). The badge turns to
       "Documents complete".
-- [ ] Back on his application, approve Peter for a smaller amount. "Loan agreement (PDF)" appears under
-      Print: open it and check the amount, his details and the DRAFT note. Then record disbursement.
-      He becomes Active with a schedule.
+- [ ] Back on his application, approve Peter for a smaller amount. The pay-out steps appear:
+  - [ ] Step 1: "Loan agreement (PDF)" opens with the amount, his details and the DRAFT note.
+  - [ ] Step 2: shows "SMS sent to borrower". The SMS text is in the API log: `docker compose logs mclender-api | Select-String "approved"`.
+        "Log a phone call" with a note adds it to the list and to History.
+  - [ ] Step 4 says to upload the signed agreement first; there is no pay-out button yet.
+  - [ ] Step 3: upload any PDF as the signed agreement. It shows as a link; Signed is ticked on the progress bar.
+  - [ ] Step 4: the account number is filled in from his profile. Enter a reference and record the disbursement.
+        He becomes Active with a schedule, and the log shows the "paid out" SMS.
+  - [ ] In Mifos X: the loan's Notes show the SMS, phone call and signed-agreement entries; Documents has the
+        signed copy; the disbursement transaction shows Bank Transfer and your reference.
 - [ ] Reject Joyce with a note. She leaves the list.
 - [ ] Repayments: record K 472.80 for Mary by Mobile Money with a reference. A receipt shows;
       "Print receipt (PDF)" opens it.

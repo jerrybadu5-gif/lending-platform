@@ -150,7 +150,7 @@ def test_disbursement_also_needs_kyc(staff):
     staff.app.state.services.settings.kyc_required_for_approval = False
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
     staff.app.state.services.settings.kyc_required_for_approval = True
-    r = staff.post("/api/staff/loans/542/disburse")
+    r = staff.post("/api/staff/loans/542/disburse", json={"reference": "TT-1"})
     assert r.status_code == 409 and "Bank statement" in r.json()["detail"]
 
 

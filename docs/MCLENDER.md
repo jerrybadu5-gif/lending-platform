@@ -39,6 +39,7 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 | New / edit borrower | `/staff/borrowers/new`, `/staff/borrowers/:id/edit` | Personal details, NID, contact, employer and payroll number, income, bank account for payout, next of kin. Must be 18+; phone and NID must be unique |
 | Borrower profile | `/staff/borrowers/:id` | Details, KYC checklist with uploads (ID, payslips, bank statement, payroll deduction authority), documents on file, loans, new loan application (checked at once) |
 | Repayments | `/staff/repayments` | Due today, in arrears, all open; record a repayment by method with a reference; receipt plus SMS |
+| Pay-out steps | Loan review, once approved | 1 print the agreement; 2 tell the borrower to come and sign (SMS sent automatically on approval; send again or log a phone call, each saved as a loan note); 3 upload the signed agreement to the loan; 4 record the pay-out (bank transfer, mobile money or cash, account and reference), which needs step 3. The borrower gets an SMS when the money is paid out |
 | Printed documents | Loan review, repayment receipt | Loan agreement (once approved; marked DRAFT until `MCL_AGREEMENT_REVIEWED=true`), repayment schedule, statement, receipts, all PDF |
 | Borrower sign-in | `/portal/login` | Phone, then a 6-digit SMS code valid for 5 minutes, 5 tries |
 | Borrower home | `/portal` | Left to pay, progress, next or overdue payment, ways to pay with reference, recent payments, statement and schedule PDFs |
@@ -50,6 +51,7 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 - Staff sign-in is limited to 10 tries per 5 minutes per user and address. SMS codes are limited to 5 requests per 15 minutes per number and per address. The code request answers the same way for unknown numbers, so it can't be used to find out who borrows from Breez Lending.
 - Approve, reject and disburse need a credit manager role in McLender, and Fineract's own permissions and maker-checker still apply.
 - KYC uploads: the file type is read from the file's first bytes (PDF, JPEG, PNG only), never from its name; names are cleaned; 5 MB limit, the same as Fineract's (`MCL_MAX_UPLOAD_MB`). Downloads are always sent as attachments, never shown inline. The KYC check runs at approval and again at disbursement. The portal's Fineract user has no access to bank or next-of-kin details (`dt_borrower_profile`) or to documents.
+- Loans can't be paid out until the signed agreement is uploaded to the loan (`MCL_SIGNED_AGREEMENT_REQUIRED`); only credit managers record pay-outs.
 - Loans can't be approved until the borrower's KYC documents are on file (`MCL_KYC_REQUIRED`, `MCL_KYC_REQUIRED_FOR_APPROVAL`).
 - Money is `Decimal` in Python and a decimal string in JSON and in the browser. No floating-point maths touches amounts.
 - Caddy sends a strict Content-Security-Policy and other security headers. The API sends `Cache-Control: no-store`. The service worker caches the app shell only, never API answers.

@@ -133,6 +133,7 @@ services:
       MCL_COMPANY_EMAIL: ${COMPANY_EMAIL:-}
       MCL_AGREEMENT_REVIEWED: ${MCL_AGREEMENT_REVIEWED:-false}
       MCL_KYC_REQUIRED_FOR_APPROVAL: ${MCL_KYC_REQUIRED_FOR_APPROVAL:-true}
+      MCL_SIGNED_AGREEMENT_REQUIRED: ${MCL_SIGNED_AGREEMENT_REQUIRED:-true}
 
   # McLender web app (staff app at /staff, borrower portal at /portal), served by Caddy
   mclender-web:

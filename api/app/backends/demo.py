@@ -25,6 +25,7 @@ from ..domain.models import (
     BorrowerListItem,
     CollectionItem,
     Dashboard,
+    DisburseIn,
     DocumentKind,
     Installment,
     InterestMethod,
@@ -117,6 +118,7 @@ class DemoBackend:
         self.borrowers: dict[int, Borrower] = {}
         self.loans: dict[int, DemoLoan] = {}
         self.documents: dict[int, list[tuple[BorrowerDocument, bytes]]] = {}
+        self.loan_documents: dict[int, list[tuple[BorrowerDocument, bytes]]] = {}
         self._borrower_ids = itertools.count(11)
         self._doc_ids = itertools.count(1)
         self._seed(today)
@@ -460,15 +462,49 @@ class DemoBackend:
         )
         return ActionResult(loan_id=loan_id, state="REJECTED", message=f"{loan.ref} rejected.")
 
-    async def disburse(self, cred: str, loan_id: int, today: date) -> ActionResult:
+    async def disburse(self, cred: str, loan_id: int, body: DisburseIn, today: date) -> ActionResult:
         loan = self._loan(loan_id)
         if loan.state != "APPROVED":
             raise BackendError("Only approved loans can be disbursed.", 409)
         loan.state, loan.disbursed_on, loan.first_due = "ACTIVE", today, add_months(today, 1)
+        into = f" into {body.account}" if body.account else ""
         loan.history.append(
-            LoanEvent(when=today.isoformat(), text=f"Disbursed K {loan.principal:,.2f}", who=cred.removeprefix("demo:"))
+            LoanEvent(
+                when=today.isoformat(),
+                text=f"Disbursed K {loan.principal:,.2f} by {METHOD_NAMES.get(body.method, body.method).lower()}"
+                f"{into}, reference {body.reference}",
+                who=cred.removeprefix("demo:"),
+            )
         )
         return ActionResult(loan_id=loan_id, state="ACTIVE", message=f"{loan.ref} disbursed.")
+
+    async def add_loan_note(self, cred: str, loan_id: int, text: str, today: date) -> None:
+        self._loan(loan_id).history.append(LoanEvent(when=today.isoformat(), text=text, who=cred.removeprefix("demo:")))
+
+    async def list_loan_documents(self, cred: str, loan_id: int) -> list[BorrowerDocument]:
+        self._loan(loan_id)
+        return [d for d, _ in reversed(self.loan_documents.get(loan_id, []))]
+
+    async def add_loan_document(
+        self, cred: str, loan_id: int, kind: str, file_name: str, content_type: str, data: bytes, today: date
+    ) -> BorrowerDocument:
+        self._loan(loan_id)
+        doc = BorrowerDocument(
+            id=next(self._doc_ids),
+            kind=cast(DocumentKind, kind),
+            file_name=file_name,
+            content_type=content_type,
+            size=len(data),
+            uploaded_on=today,
+        )
+        self.loan_documents.setdefault(loan_id, []).append((doc, data))
+        return doc
+
+    async def get_loan_document(self, cred: str, loan_id: int, doc_id: int) -> tuple[BorrowerDocument, bytes]:
+        for doc, data in self.loan_documents.get(loan_id, []):
+            if doc.id == doc_id:
+                return doc, data
+        raise NotFound("Document")
 
     async def collections(self, cred: str, today: date) -> list[CollectionItem]:
         out = []

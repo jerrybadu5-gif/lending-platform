@@ -15,7 +15,7 @@ Recommendation = Literal["APPROVE", "REFER", "DECLINE"]
 InterestMethod = Literal["DECLINING_BALANCE", "FLAT"]
 PaymentMethod = Literal["cash", "bank", "mobile", "payroll"]
 Gender = Literal["female", "male"]
-DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other"]
+DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other", "signed_agreement"]
 
 DOCUMENT_LABELS: dict[str, str] = {
     "id": "ID (NID card, passport or driver's licence)",
@@ -23,6 +23,7 @@ DOCUMENT_LABELS: dict[str, str] = {
     "bank_statement": "Bank statement (last 3 months)",
     "deduction_authority": "Payroll deduction authority (signed)",
     "other": "Other document",
+    "signed_agreement": "Signed loan agreement",
 }
 
 
@@ -195,6 +196,34 @@ class Receipt(BaseModel):
     received_on: date
     sms_sent_to: str | None = None
     payment_id: int | None = None  # for printing the receipt as a PDF
+
+
+class DisburseIn(BaseModel):
+    """How the money was paid out to the borrower."""
+
+    method: Literal["bank", "mobile", "cash"] = "bank"
+    reference: str = Field(min_length=2, max_length=60)  # bank transfer / mobile money receipt / cash voucher
+    account: str | None = Field(default=None, max_length=40)  # account or wallet paid into
+
+
+class ContactIn(BaseModel):
+    """Telling the borrower their loan is approved and the agreement is ready to sign."""
+
+    channel: Literal["sms", "phone"]
+    note: str = Field(default="", max_length=300)
+
+
+class PayoutStatus(BaseModel):
+    """Where an approved loan is in the pay-out steps: agreement printed, borrower told, signed copy
+    uploaded, then pay out."""
+
+    loan_id: int
+    borrower_told: list[LoanEvent] = []
+    signed_agreement: BorrowerDocument | None = None
+    bank: BankAccount | None = None
+    phone: str | None = None
+    ready: bool = False
+    missing: list[str] = []
 
 
 class ActionResult(BaseModel):

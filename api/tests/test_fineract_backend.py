@@ -119,6 +119,9 @@ def test_get_loan_maps_everything(fb):
         ],
     )
     respx.get(f"{BASE}/datatables/dt_loan_assessment/536").respond(200, json=[])
+    respx.get(f"{BASE}/loans/536/notes").respond(
+        200, json=[{"note": "Phoned borrower: coming Friday", "createdByUsername": "grace", "createdOn": [2026, 10, 5]}]
+    )
     respx.get(f"{BASE}/datatables/dt_borrower_profile/8").respond(
         200,
         json=[
@@ -142,7 +145,8 @@ def test_get_loan_maps_everything(fb):
     assert d.ref == "LN-000000536" and d.state == "PENDING" and d.borrower.phone == "71234567"
     assert d.borrower.monthly_income == D("4000") and d.borrower.credit_score == 700
     assert d.schedule[0].total == D("1418.39") and d.assessment is None
-    assert d.history[0].text == "Application submitted"
+    assert d.history[-1].text == "Application submitted"  # newest first; notes merged in by date
+    assert d.history[0].text == "Phoned borrower: coming Friday" and d.history[0].who == "grace"
 
 
 @respx.mock
@@ -420,3 +424,33 @@ def test_staff_application_refused_when_one_is_waiting(fb):
     with pytest.raises(BackendError) as e:
         run(fb.create_application("K", 8, ApplicationIn(amount=D("1000"), months=6), TODAY))
     assert e.value.status == 409
+
+
+@respx.mock
+def test_disburse_sends_payment_details(fb):
+    from app.domain.models import DisburseIn
+
+    respx.get(f"{BASE}/paymenttypes").respond(200, json=[{"id": 2, "name": "Bank Transfer"}])
+    route = respx.post(f"{BASE}/loans/536", params={"command": "disburse"}).respond(
+        200, json={"loanId": 536, "changes": {"status": {"id": 300}}}
+    )
+    r = run(fb.disburse("K", 536, DisburseIn(method="bank", reference="TT-9", account="2003 1188"), TODAY))
+    sent = json.loads(route.calls[0].request.content)
+    assert r.state == "ACTIVE" and sent["paymentTypeId"] == 2 and sent["receiptNumber"] == "TT-9"
+    assert sent["accountNumber"] == "2003 1188" and sent["actualDisbursementDate"] == "2026-10-06"
+
+
+@respx.mock
+def test_loan_notes_and_signed_agreement(fb):
+    note = respx.post(f"{BASE}/loans/536/notes").respond(200, json={"resourceId": 1})
+    run(fb.add_loan_note("K", 536, "Phoned borrower", TODAY))
+    assert json.loads(note.calls[0].request.content) == {"note": "Phoned borrower"}
+    up = respx.post(f"{BASE}/loans/536/documents").respond(200, json={"resourceId": 77})
+    d = run(fb.add_loan_document("K", 536, "signed_agreement", "s.pdf", "application/pdf", b"%PDF", TODAY))
+    assert d.id == 77 and b"signed_agreement" in up.calls[0].request.content
+
+
+@respx.mock
+def test_portal_cannot_read_notes_is_fine(fb):
+    respx.get(f"{BASE}/loans/536/notes").respond(403, json={"defaultUserMessage": "no"})
+    assert run(fb._loan_notes("portal", 536)) == []

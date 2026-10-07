@@ -8,13 +8,14 @@ export type Recommendation = 'APPROVE' | 'REFER' | 'DECLINE'
 export type PaymentMethod = 'cash' | 'bank' | 'mobile' | 'payroll'
 
 export type Gender = 'female' | 'male'
-export type DocumentKind = 'id' | 'payslip' | 'bank_statement' | 'deduction_authority' | 'other'
+export type DocumentKind = 'id' | 'payslip' | 'bank_statement' | 'deduction_authority' | 'other' | 'signed_agreement'
 export const DOCUMENT_LABELS: Record<DocumentKind, string> = {
   id: "ID (NID card, passport or driver's licence)",
   payslip: 'Latest 3 payslips',
   bank_statement: 'Bank statement (last 3 months)',
   deduction_authority: 'Payroll deduction authority (signed)',
   other: 'Other document',
+  signed_agreement: 'Signed loan agreement',
 }
 
 export interface StaffUser { username: string; display_name: string; roles: string[] }
@@ -37,6 +38,12 @@ export interface BorrowerDocument {
   id: number; kind: DocumentKind; file_name: string; content_type: string; size: number; uploaded_on: string | null
 }
 export interface KycStatus { complete: boolean; missing: string[]; have: Partial<Record<DocumentKind, number>> }
+export interface LoanEvent { when: string; text: string; who: string | null }
+export interface PayoutStatus {
+  loan_id: number; borrower_told: LoanEvent[]; signed_agreement: BorrowerDocument | null; bank: BankAccount | null
+  phone: string | null; ready: boolean; missing: string[]
+}
+export type PayoutMethod = 'bank' | 'mobile' | 'cash'
 export interface BorrowerProfile { borrower: Borrower; documents: BorrowerDocument[]; kyc: KycStatus; loans: LoanSummary[] }
 export interface Installment {
   number: number; due_date: string; principal: Money; interest: Money; fees: Money; total: Money; paid: Money
@@ -136,7 +143,16 @@ export const api = {
     approve: (id: number, amount: string, note: string) =>
       request<ActionResult>('POST', `/api/staff/loans/${id}/approve`, { amount, note }),
     reject: (id: number, note: string) => request<ActionResult>('POST', `/api/staff/loans/${id}/reject`, { note }),
-    disburse: (id: number) => request<ActionResult>('POST', `/api/staff/loans/${id}/disburse`),
+    disburse: (id: number, body: { method: PayoutMethod; reference: string; account: string | null }) =>
+      request<ActionResult>('POST', `/api/staff/loans/${id}/disburse`, body),
+    payout: (id: number) => request<PayoutStatus>('GET', `/api/staff/loans/${id}/payout`),
+    contact: (id: number, channel: 'sms' | 'phone', note = '') =>
+      request<LoanEvent>('POST', `/api/staff/loans/${id}/contact`, { channel, note }),
+    uploadSigned: (id: number, file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return request<BorrowerDocument>('POST', `/api/staff/loans/${id}/signed-agreement`, form)
+    },
     collections: (view: 'today' | 'arrears' | 'all') =>
       request<CollectionItem[]>('GET', `/api/staff/collections?view=${view}`),
     repay: (id: number, body: { amount: string; method: PaymentMethod; reference: string; received_on: string }) =>
@@ -170,6 +186,7 @@ export const api = {
 /** Links for files the browser downloads directly (the session cookie goes with them). */
 export const files = {
   document: (borrowerId: number, docId: number) => `/api/staff/borrowers/${borrowerId}/documents/${docId}`,
+  loanDocument: (loanId: number, docId: number) => `/api/staff/loans/${loanId}/documents/${docId}`,
   agreement: (loanId: number) => `/api/staff/loans/${loanId}/agreement.pdf`,
   schedule: (loanId: number) => `/api/staff/loans/${loanId}/schedule.pdf`,
   statement: (loanId: number) => `/api/staff/loans/${loanId}/statement.pdf`,

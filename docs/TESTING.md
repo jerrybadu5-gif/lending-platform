@@ -37,7 +37,7 @@ Sample data is dated from today, so "due today" always has loans in it. Close an
 - [ ] New borrower: an empty save marks what's missing; someone under 18 is refused; a phone already in use is refused.
 - [ ] On the new profile, "4 documents needed". Upload any PDF or photo as the ID: it shows under Documents on file and downloads again.
 - [ ] Joyce Ilave's application can't be approved: it lists the bank statement and payroll deduction authority as missing.
-- [ ] After approving a loan, "Loan agreement (PDF)" opens a 3-page agreement marked DRAFT. Schedule, statement and receipts print too.
+- [ ] After approving a loan, the pay-out steps appear: the agreement (3 pages, marked DRAFT), "SMS sent to borrower", then upload a signed copy (any PDF), then record the pay-out with a reference. Pay-out isn't possible before the signed copy is uploaded.
 
 **Permissions**
 - [ ] Sign out and sign in as `officer` / `officer`. Approving a loan gives "Only a credit manager can do this."

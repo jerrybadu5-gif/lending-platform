@@ -6,6 +6,7 @@ import { AssessmentCard, Button, DataTable, ErrorNote, Field, LoanStepper, Money
 import { formatDate, formatKina, parseKina } from '../lib/format'
 import { pillFor, stepFor } from '../lib/loan'
 import { DownloadLink } from '../components/DownloadLink'
+import { PayoutSteps, usePayout } from './Payout'
 
 function suggestedAmount(l: LoanDetail): string {
   const cap = l.assessment ? Number(l.assessment.max_recommended_principal) : Number(l.principal)
@@ -26,6 +27,7 @@ function Review({ loan }: { loan: LoanDetail }) {
   const b = loan.borrower
   const a = loan.assessment
   const rows = showAll ? loan.schedule : loan.schedule.slice(0, 6)
+  const payout = usePayout(loan)
   return (
     <>
       <div className="text-[13px] text-ink-muted"><Link to="/staff/applications">Applications</Link> / <span className="ml-ref">{loan.ref}</span></div>
@@ -40,7 +42,7 @@ function Review({ loan }: { loan: LoanDetail }) {
             {loan.interest_method === 'FLAT' ? 'flat' : 'reducing balance'} · <span className="ml-ref">{loan.ref}</span>
           </div>
         </div>
-        <LoanStepper current={stepFor(loan.state, !!a)} />
+        <LoanStepper current={stepFor(loan.state, !!a, !!payout.data?.signed_agreement)} />
       </header>
 
       <div className="flex flex-wrap gap-6 items-start">
@@ -111,7 +113,8 @@ const STATEMENT_STATES = ['ACTIVE', 'ARREARS', 'ARREARS_LATE', 'CLOSED', 'WRITTE
 
 function LoanDocuments({ loan }: { loan: LoanDetail }) {
   const links = [
-    AGREEMENT_STATES.includes(loan.state) && { href: files.agreement(loan.id), label: 'Loan agreement' },
+    // While approved, the agreement is step 1 of the pay-out steps instead.
+    AGREEMENT_STATES.includes(loan.state) && loan.state !== 'APPROVED' && { href: files.agreement(loan.id), label: 'Loan agreement' },
     { href: files.schedule(loan.id), label: 'Repayment schedule' },
     STATEMENT_STATES.includes(loan.state) && { href: files.statement(loan.id), label: 'Statement' },
   ].filter(Boolean) as { href: string; label: string }[]
@@ -163,14 +166,14 @@ function Decision({ loan }: { loan: LoanDetail }) {
     setResult(r)
     setConfirmReject(false)
     qc.invalidateQueries({ queryKey: ['loan', loan.id] })
+    qc.invalidateQueries({ queryKey: ['payout', loan.id] })
     qc.invalidateQueries({ queryKey: ['loans'] })
     qc.invalidateQueries({ queryKey: ['dashboard'] })
   }
   const approve = useMutation({ mutationFn: () => api.staff.approve(loan.id, parseKina(amount) ?? '', note), onSuccess: done })
   const reject = useMutation({ mutationFn: () => api.staff.reject(loan.id, note), onSuccess: done })
-  const disburse = useMutation({ mutationFn: () => api.staff.disburse(loan.id), onSuccess: done })
   const reassess = useMutation({ mutationFn: () => api.staff.assess(loan.id), onSuccess: (d) => qc.setQueryData(['loan', loan.id], d) })
-  const error = approve.error ?? reject.error ?? disburse.error ?? reassess.error
+  const error = approve.error ?? reject.error ?? reassess.error
   const amountError = parseKina(amount) === null ? 'Enter an amount like 13,000.00' : undefined
 
   return (
@@ -212,12 +215,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
         </div>
       )}
 
-      {loan.state === 'APPROVED' && (
-        <>
-          <p className="m-0">Approved for {formatKina(loan.principal)}. Pay it out to the borrower, then record the disbursement.</p>
-          <Button variant="primary" className="self-start" disabled={disburse.isPending} onClick={() => disburse.mutate()}>Record disbursement</Button>
-        </>
-      )}
+      {loan.state === 'APPROVED' && <PayoutSteps loan={loan} onDone={done} />}
 
       {['ACTIVE', 'ARREARS', 'ARREARS_LATE'].includes(loan.state) && (
         <>

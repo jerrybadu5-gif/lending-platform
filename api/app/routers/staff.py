@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -13,6 +14,7 @@ from ..domain.models import (
     ApproveIn,
     CollectionItem,
     Dashboard,
+    DisburseIn,
     LoanDetail,
     LoanSummary,
     Receipt,
@@ -23,6 +25,9 @@ from ..domain.models import (
 from ..security import STAFF_COOKIE, StaffSession, end_session, staff_session, start_session
 from ..underwriting import assess_loan
 from .borrowers import borrower_kyc
+from .payout import notify_approved, payout_status
+
+log = logging.getLogger("mclender.staff")
 
 router = APIRouter(prefix="/api/staff", tags=["staff"])
 APPROVER_ROLES = {"credit manager", "super user", "branch manager"}
@@ -107,7 +112,14 @@ async def approve(
 ):
     _require_approver(s)
     await _require_kyc(svc, s.cred, loan_id)
-    return await svc.backend.approve(s.cred, loan_id, body, svc.today())
+    result = await svc.backend.approve(s.cred, loan_id, body, svc.today())
+    if result.state == "APPROVED":  # not while a second approver still has to confirm (maker-checker)
+        try:
+            await notify_approved(svc, s.cred, loan_id)
+        except Exception:  # the approval stands even if the SMS or note fails; staff can send it again
+            log.exception("Could not tell the borrower about approved loan %s", loan_id)
+            result.message += " The SMS to the borrower didn't go: send it from the loan."
+    return result
 
 
 async def _require_kyc(svc: Services, cred: str, loan_id: int) -> None:
@@ -140,10 +152,25 @@ async def reject(
 
 
 @router.post("/loans/{loan_id}/disburse", response_model=ActionResult)
-async def disburse(loan_id: int, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
+async def disburse(
+    loan_id: int, body: DisburseIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
+):
     _require_approver(s)
     await _require_kyc(svc, s.cred, loan_id)
-    return await svc.backend.disburse(s.cred, loan_id, svc.today())
+    payout = await payout_status(svc, s.cred, loan_id)
+    if payout.missing:
+        raise HTTPException(409, " ".join(payout.missing))
+    result = await svc.backend.disburse(s.cred, loan_id, body, svc.today())
+    if result.state == "ACTIVE" and payout.phone:
+        try:
+            await svc.sms.send(
+                payout.phone,
+                f"{svc.settings.company_name}: we have paid out your loan. Reference {body.reference}. "
+                "Your repayment schedule is in your signed agreement.",
+            )
+        except Exception:
+            log.exception("Could not send the pay-out SMS for loan %s", loan_id)
+    return result
 
 
 @router.get("/collections", response_model=list[CollectionItem])

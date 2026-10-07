@@ -63,6 +63,8 @@ class Settings(BaseSettings):
         default_factory=lambda: {"id": 1, "payslip": 1, "bank_statement": 1, "deduction_authority": 1}
     )
     kyc_required_for_approval: bool = True
+    # A loan is paid out only once the borrower's signed agreement is uploaded to it.
+    signed_agreement_required: bool = True
     max_upload_mb: int = 5  # Fineract's own document limit is 5 MB
 
     # The loan agreement is a draft template until a PNG lawyer has reviewed the wording. While this is

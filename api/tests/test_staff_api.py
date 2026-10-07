@@ -67,7 +67,11 @@ def test_approve_disburse_flow(staff):
     r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00", "note": "Reduced to fit DTI"})
     assert r.status_code == 200 and r.json()["state"] == "APPROVED"
     assert staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00"}).status_code == 409
-    r = staff.post("/api/staff/loans/536/disburse")
+    signed = staff.post(
+        "/api/staff/loans/536/signed-agreement", files={"file": ("signed.pdf", b"%PDF-1.4 signed", "x")}
+    )
+    assert signed.status_code == 201
+    r = staff.post("/api/staff/loans/536/disburse", json={"method": "bank", "reference": "BSP-TT-77120"})
     assert r.json()["state"] == "ACTIVE"
     d = staff.get("/api/staff/loans/536").json()
     assert d["principal"] == "13000.00" and d["state"] == "ACTIVE" and d["next_due_date"]

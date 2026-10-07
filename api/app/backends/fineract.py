@@ -43,6 +43,7 @@ from ..domain.models import (
     BorrowerListItem,
     CollectionItem,
     Dashboard,
+    DisburseIn,
     DocumentKind,
     Installment,
     LoanDetail,
@@ -312,9 +313,10 @@ class FineractBackend:
     async def get_loan(self, cred: str, loan_id: int, today: date) -> LoanDetail:
         raw, inst = await self._schedule(cred, loan_id)
         client_id = int(raw["clientId"])
-        borrower, a = await asyncio.gather(
+        borrower, a, notes = await asyncio.gather(
             self._borrower(cred, client_id),
             self._datatable(cred, ASSESSMENT_TABLE, loan_id),
+            self._loan_notes(cred, loan_id),
         )
         s = self._summary(raw, today, a)
         unpaid = [i for i in inst if not i.complete]
@@ -342,6 +344,7 @@ class FineractBackend:
             (tl.get("closedOnDate"), "Closed", tl.get("closedByUsername")),
         ]
         history = [LoanEvent(when=fdate(d).isoformat(), text=t, who=w) for d, t, w in events if fdate(d)]  # type: ignore[union-attr]
+        history = sorted(history + notes, key=lambda e: e.when)  # stable: same-day events keep their order
         payments = [
             Payment(
                 id=int(t["id"]) if t.get("id") is not None else None,
@@ -425,9 +428,18 @@ class FineractBackend:
             )
         return ActionResult(loan_id=loan_id, state="REJECTED", message="Application rejected.")
 
-    async def disburse(self, cred: str, loan_id: int, today: date) -> ActionResult:
+    async def disburse(self, cred: str, loan_id: int, body: DisburseIn, today: date) -> ActionResult:
+        details: dict[str, Any] = {
+            "paymentTypeId": await self._payment_type_id(cred, body.method),
+            "receiptNumber": body.reference,
+            "note": f"Paid out in McLender ({body.method}), reference {body.reference}",
+        }
+        if body.account:
+            details["accountNumber"] = body.account
         result = await self._post(
-            cred, f"/loans/{loan_id}?command=disburse", {**DATE_FMT, "actualDisbursementDate": today.isoformat()}
+            cred,
+            f"/loans/{loan_id}?command=disburse",
+            {**DATE_FMT, "actualDisbursementDate": today.isoformat(), **details},
         )
         self._invalidate()
         if self._pending_checker(result):
@@ -435,6 +447,52 @@ class FineractBackend:
                 loan_id=loan_id, state="APPROVED", message="Disbursement saved. A second approver must confirm it."
             )
         return ActionResult(loan_id=loan_id, state="ACTIVE", message="Loan disbursed.")
+
+    async def _loan_notes(self, cred: str, loan_id: int) -> list[LoanEvent]:
+        """Loan notes (contact log, signed agreement, purpose) for the loan's history."""
+        try:
+            raws = await self._get(cred, f"/loans/{loan_id}/notes")
+        except BackendError as e:
+            if e.status in (403, 404):  # the portal user can't read notes; borrowers don't see them
+                return []
+            raise
+        out = []
+        for n in raws or []:
+            when = _note_date(n.get("createdOn"))
+            if when and n.get("note"):
+                out.append(LoanEvent(when=when.isoformat(), text=n["note"], who=n.get("createdByUsername")))
+        return out
+
+    async def add_loan_note(self, cred: str, loan_id: int, text: str, today: date) -> None:
+        await self._post(cred, f"/loans/{loan_id}/notes", {"note": text[:1000]})
+
+    async def list_loan_documents(self, cred: str, loan_id: int) -> list[BorrowerDocument]:
+        raws = await self._get(cred, f"/loans/{loan_id}/documents")
+        return sorted((self._document(r) for r in raws or []), key=lambda d: d.id, reverse=True)
+
+    async def add_loan_document(
+        self, cred: str, loan_id: int, kind: str, file_name: str, content_type: str, data: bytes, today: date
+    ) -> BorrowerDocument:
+        resp = await self._send(
+            cred,
+            "POST",
+            f"/loans/{loan_id}/documents",
+            data={"name": kind, "description": f"McLender upload {today.isoformat()}"},
+            files={"file": (file_name, data, content_type)},
+        )
+        return BorrowerDocument(
+            id=int(resp.json()["resourceId"]),
+            kind=cast(DocumentKind, kind),
+            file_name=file_name,
+            content_type=content_type,
+            size=len(data),
+            uploaded_on=today,
+        )
+
+    async def get_loan_document(self, cred: str, loan_id: int, doc_id: int) -> tuple[BorrowerDocument, bytes]:
+        meta = await self._get(cred, f"/loans/{loan_id}/documents/{doc_id}")
+        resp = await self._send(cred, "GET", f"/loans/{loan_id}/documents/{doc_id}/attachment")
+        return self._document(meta), resp.content
 
     async def _live_with_schedules(self, cred: str, today: date) -> list[tuple[dict, list[Installment]]]:
         async def build():
@@ -907,6 +965,13 @@ class FineractBackend:
             except BackendError as e:  # the application stands even if the note can't be saved
                 log.warning("Could not save the purpose note on loan %s: %s", summary.id, e.message)
         return summary
+
+
+def _note_date(v: Any) -> date | None:
+    """Note dates come as [y, m, d, ...], an ISO string, or epoch milliseconds, depending on version."""
+    if isinstance(v, int | float):
+        return date.fromtimestamp(v / 1000)
+    return fdate(v)
 
 
 def _nid_key(nid: str) -> str:
