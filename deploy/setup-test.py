@@ -63,6 +63,38 @@ ROLES = {
 }
 
 
+SPECIALS = "!@#%*-_+=?"
+
+
+def strong(pw: str) -> bool:
+    """Fineract's default password policy: 12-50 characters, upper, lower, digit and special
+    character, no spaces, and no character repeated twice in a row."""
+    return (
+        12 <= len(pw) <= 50
+        and any(c.isupper() for c in pw)
+        and any(c.islower() for c in pw)
+        and any(c.isdigit() for c in pw)
+        and any(not c.isalnum() for c in pw)
+        and " " not in pw
+        and not any(a == b for a, b in zip(pw, pw[1:]))
+    )
+
+
+def new_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789" + SPECIALS
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(16))
+        if strong(pw):
+            return pw
+
+
+def set_env_value(key: str, value: str) -> None:
+    path = ROOT / "deploy" / ".env"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = [f"{key}={value}" if line.startswith(f"{key}=") else line for line in lines]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def step(msg: str) -> None:
     print(f"\n== {msg}")
 
@@ -89,8 +121,12 @@ def main() -> None:
     f = Fineract.from_env()
     portal_user = env.get("MCL_FINERACT_PORTAL_USER", "portal")
     portal_pw = env.get("MCL_FINERACT_PORTAL_PASSWORD", "")
-    if not portal_pw or portal_pw.startswith("change-me"):
-        sys.exit("Set MCL_FINERACT_PORTAL_PASSWORD in deploy/.env first (see docs/LIVE-TESTING.md step 1).")
+    if not portal_pw or portal_pw.startswith("change-me") or not strong(portal_pw):
+        # Fineract would refuse it, so make a strong one and save it where the API reads it.
+        portal_pw = new_password()
+        set_env_value("MCL_FINERACT_PORTAL_PASSWORD", portal_pw)
+        print("! MCL_FINERACT_PORTAL_PASSWORD in deploy/.env was too weak for Fineract; it now has a new,")
+        print("  strong one. Restart the API afterwards: cd deploy; docker compose up -d mclender-api")
     try:
         f.get("/offices")
     except FineractError as e:
@@ -161,9 +197,13 @@ def main() -> None:
     def user(username, first, last, role, password=None, is_staff=True):
         if username in users:
             if new_passwords and is_staff:
-                password = "Mcl-" + secrets.token_urlsafe(9)
+                password = new_password()
                 f.put(f"/users/{users[username]['id']}", {"password": password, "repeatPassword": password})
                 print(f"* {username:<8} new password: {password}   <- write this down")
+            elif not is_staff:
+                # Keep the portal user's password the same as deploy/.env, which the API signs in with.
+                f.put(f"/users/{users[username]['id']}", {"password": password, "repeatPassword": password})
+                print(f"= {username} (password matched to deploy/.env)")
             else:
                 print(f"= {username}")
             return
@@ -179,7 +219,7 @@ def main() -> None:
                     "isActive": True, "joiningDate": (TODAY - timedelta(days=365)).isoformat(),
                 })["resourceId"]
             body["staffId"] = staff[display]
-        password = password or "Mcl-" + secrets.token_urlsafe(9)
+        password = password or new_password()
         f.post("/users", {**body, "password": password, "repeatPassword": password})
         shown = f"password: {password}   <- write this down" if is_staff else "password: the one in deploy/.env"
         print(f"+ {username:<8} ({role}) {shown}")
