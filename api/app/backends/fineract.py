@@ -154,7 +154,7 @@ class FineractBackend:
         async with self._sem:
             resp = await self.http.request(method, path, json=body, headers=self._auth(cred))
         if resp.status_code == 401:
-            raise BackendError("Your session with Fineract has ended. Please sign in again.", 401)
+            raise self._unauthorised(cred)
         if resp.status_code == 403:
             raise BackendError(fineract_message(resp) or "You don't have permission to do this.", 403)
         if resp.status_code == 404:
@@ -163,6 +163,17 @@ class FineractBackend:
             raise BackendError(fineract_message(resp), 422 if resp.status_code < 500 else 502)
         return resp.json() if resp.content else None
 
+    @staticmethod
+    def _unauthorised(cred: str) -> BackendError:
+        if cred == "portal":
+            # The portal's technical Fineract user was refused: a set-up problem, not the borrower's.
+            log.error(
+                "Fineract refused the portal user. Check MCL_FINERACT_PORTAL_USER and MCL_FINERACT_PORTAL_PASSWORD "
+                "match the Fineract user (deploy/setup-test.py keeps them in step), then restart the API."
+            )
+            return BackendError("We can't show your loan right now. Please try again later or call us.", 503)
+        return BackendError("Your session with Fineract has ended. Please sign in again.", 401)
+
     async def _send(self, cred: str, method: str, path: str, accept: str = "*/*", **kw: Any) -> httpx.Response:
         """A request whose body or answer isn't JSON (file upload or download). Fineract answers a file
         download only as application/octet-stream, so the client's default Accept: application/json
@@ -170,7 +181,7 @@ class FineractBackend:
         async with self._sem:
             resp = await self.http.request(method, path, headers={**self._auth(cred), "Accept": accept}, **kw)
         if resp.status_code == 401:
-            raise BackendError("Your session with Fineract has ended. Please sign in again.", 401)
+            raise self._unauthorised(cred)
         if resp.status_code == 404:
             raise NotFound("That document")
         if resp.status_code >= 400:

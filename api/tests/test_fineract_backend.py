@@ -514,3 +514,16 @@ def test_history_orders_same_day_events_sensibly(fb):
 def test_notes_failure_never_blocks_loading_a_loan(fb):
     respx.get(f"{BASE}/loans/536/notes").respond(500, text="boom")
     assert run(fb._loan_notes("K", 536)) == []
+
+
+@respx.mock
+def test_portal_user_refused_is_not_shown_as_a_sign_in_problem(fb, caplog):
+    respx.get(f"{BASE}/clients/8/accounts").respond(401, json={})
+    with pytest.raises(BackendError) as e:
+        run(fb.borrower_loans(8, TODAY))
+    assert e.value.status == 503 and "Fineract" not in e.value.message
+    assert "MCL_FINERACT_PORTAL_PASSWORD" in caplog.text
+    respx.get(f"{BASE}/loans/1").respond(401, json={})
+    with pytest.raises(BackendError) as e:
+        run(fb._get("STAFFKEY", "/loans/1"))
+    assert e.value.status == 401  # staff are asked to sign in again
