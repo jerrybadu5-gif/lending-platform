@@ -12,9 +12,23 @@ from typing import Any, Optional
 
 class FineractError(RuntimeError):
     def __init__(self, status: int, body: str):
-        super().__init__(f"HTTP {status}: {body[:500]}")
+        super().__init__(f"HTTP {status}: {self._readable(body)}")
         self.status = status
         self.body = body
+
+    @staticmethod
+    def _readable(body: str) -> str:
+        """Fineract's validation errors as one line each, instead of a long JSON blob."""
+        try:
+            data = json.loads(body)
+            errors = data.get("errors") or []
+            if not isinstance(errors, list):
+                return body[:1000]
+            lines = [f"{e.get('parameterName') or '-'}: {e.get('defaultUserMessage') or e.get('developerMessage')}"
+                     for e in errors]
+            return "\n  ".join([data.get("defaultUserMessage", "")] + lines) if lines else body[:1000]
+        except (ValueError, AttributeError, TypeError):
+            return body[:1000]
 
 
 class Fineract:

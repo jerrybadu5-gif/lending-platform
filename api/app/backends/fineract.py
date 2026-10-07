@@ -5,10 +5,12 @@ roles, permissions and maker-checker rules still apply. Portal calls run with a 
 user (MCL_FINERACT_PORTAL_USER). Give its role only these permissions:
 READ_CLIENT, READ_CLIENTIDENTIFIER (finding a borrower by phone uses client search),
 READ_LOAN, CREATE_LOAN, READ_LOANPRODUCT, and READ/CREATE/UPDATE on the data tables
-dt_borrower_financials and dt_loan_assessment.
+dt_borrower_financials and dt_loan_assessment. It needs no access to dt_borrower_profile
+(bank and next-of-kin details), so the portal never reads them.
 
-Borrower financials and assessments live in the data tables created by
-underwriting/bootstrap.py (dt_borrower_financials, dt_loan_assessment).
+Borrower financials, profile (address, employer, bank, next of kin) and assessments live in
+the data tables created by underwriting/bootstrap.py. KYC files are Fineract client documents,
+with the McLender document kind (id, payslip, ...) as the document name.
 """
 
 from __future__ import annotations
@@ -16,27 +18,41 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
+import re
 import time
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 
 from ..config import Settings
+from ..deps import local_zone as _local_zone
 from ..domain.models import (
+    DOCUMENT_LABELS,
     ActionResult,
+    ApplicationIn,
     ApproveIn,
     ArrearsBucket,
     Assessment,
+    BankAccount,
     Borrower,
+    BorrowerDocument,
+    BorrowerIn,
+    BorrowerListItem,
     CollectionItem,
     Dashboard,
+    DisburseIn,
+    DocumentKind,
     Installment,
     LoanDetail,
     LoanEvent,
+    LoanReview,
     LoanState,
     LoanSummary,
+    NextOfKin,
     Payment,
     PortalApplicationIn,
     Receipt,
@@ -44,11 +60,14 @@ from ..domain.models import (
     RepaymentIn,
     StaffUser,
 )
+from ..domain.search import match_score, rank
 from .base import AuthFailed, BackendError, NotFound, normalise_phone
 
 ZERO = Decimal("0")
 BORROWER_TABLE = "dt_borrower_financials"
+PROFILE_TABLE = "dt_borrower_profile"
 ASSESSMENT_TABLE = "dt_loan_assessment"
+REVIEW_TABLE = "dt_loan_review"  # the officer's review and the manager's reply (see underwriting/bootstrap.py)
 DATE_FMT = {"locale": "en", "dateFormat": "yyyy-MM-dd"}
 STATUS: dict[int, LoanState] = {
     100: "PENDING",
@@ -62,6 +81,7 @@ STATUS: dict[int, LoanState] = {
     700: "CLOSED",
 }
 LIVE = {"ACTIVE", "ARREARS", "ARREARS_LATE"}
+log = logging.getLogger("mclender.fineract")
 
 
 def fdate(v: Any) -> date | None:
@@ -108,6 +128,10 @@ def fineract_message(resp: httpx.Response) -> str:
     )
 
 
+async def _none() -> None:
+    return None
+
+
 class FineractBackend:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
         self.s = settings
@@ -122,7 +146,9 @@ class FineractBackend:
         ).decode()
         self._payment_types: dict[str, int] | None = None
         self._cache: dict[str, tuple[float, Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._sem = asyncio.Semaphore(8)
+        self._zone = _local_zone(settings.timezone)
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -136,7 +162,7 @@ class FineractBackend:
         async with self._sem:
             resp = await self.http.request(method, path, json=body, headers=self._auth(cred))
         if resp.status_code == 401:
-            raise BackendError("Your session with Fineract has ended. Please sign in again.", 401)
+            raise self._unauthorised(cred)
         if resp.status_code == 403:
             raise BackendError(fineract_message(resp) or "You don't have permission to do this.", 403)
         if resp.status_code == 404:
@@ -144,6 +170,31 @@ class FineractBackend:
         if resp.status_code >= 400:
             raise BackendError(fineract_message(resp), 422 if resp.status_code < 500 else 502)
         return resp.json() if resp.content else None
+
+    @staticmethod
+    def _unauthorised(cred: str) -> BackendError:
+        if cred == "portal":
+            # The portal's technical Fineract user was refused: a set-up problem, not the borrower's.
+            log.error(
+                "Fineract refused the portal user. Check MCL_FINERACT_PORTAL_USER and MCL_FINERACT_PORTAL_PASSWORD "
+                "match the Fineract user (deploy/setup-test.py keeps them in step), then restart the API."
+            )
+            return BackendError("We can't show your loan right now. Please try again later or call us.", 503)
+        return BackendError("Your session with Fineract has ended. Please sign in again.", 401)
+
+    async def _send(self, cred: str, method: str, path: str, accept: str = "*/*", **kw: Any) -> httpx.Response:
+        """A request whose body or answer isn't JSON (file upload or download). Fineract answers a file
+        download only as application/octet-stream, so the client's default Accept: application/json
+        would get 406 Not Acceptable."""
+        async with self._sem:
+            resp = await self.http.request(method, path, headers={**self._auth(cred), "Accept": accept}, **kw)
+        if resp.status_code == 401:
+            raise self._unauthorised(cred)
+        if resp.status_code == 404:
+            raise NotFound("That document")
+        if resp.status_code >= 400:
+            raise BackendError(fineract_message(resp), resp.status_code if resp.status_code < 500 else 502)
+        return resp
 
     async def _get(self, cred: str, path: str) -> Any:
         return await self._req(cred, "GET", path)
@@ -215,10 +266,12 @@ class FineractBackend:
             return None
         return rows[0] if rows else None
 
-    async def _upsert(self, cred: str, table: str, entity_id: int, values: dict) -> None:
+    async def _upsert(self, cred: str, table: str, entity_id: int, values: dict, clear_empty: bool = False) -> None:
+        """Create or update a data table row. With clear_empty, None values are sent as null so a field
+        the user emptied is cleared in Fineract (otherwise None means "leave as it is")."""
         body = {
             **DATE_FMT,
-            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in values.items() if v is not None},
+            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in values.items() if v is not None or clear_empty},
         }
         if await self._datatable(cred, table, entity_id):
             await self._req(cred, "PUT", f"/datatables/{table}/{entity_id}", body)
@@ -251,10 +304,59 @@ class FineractBackend:
         if states:
             out = [s for s in out if s.state in states]
         pending = [s for s in out if s.state == "PENDING"]  # show the recommendation in the approvals list
-        found = await asyncio.gather(*(self._datatable(cred, ASSESSMENT_TABLE, s.id) for s in pending))
-        for s, a in zip(pending, found, strict=True):
+        found, reviews = await asyncio.gather(
+            asyncio.gather(*(self._datatable(cred, ASSESSMENT_TABLE, s.id) for s in pending)),
+            asyncio.gather(*(self._review(cred, s.id) for s in pending)),
+        )
+        for s, a, r in zip(pending, found, reviews, strict=True):
             s.recommendation = (a or {}).get("recommendation")
+            s.review_stage = r.stage if r else None
         return out
+
+    async def _has_review_table(self, cred: str) -> bool:
+        async def check() -> bool:
+            try:
+                await self._get(cred, f"/datatables/{REVIEW_TABLE}")
+                return True
+            except NotFound as e:  # only a real 404; anything else (session ended, 502) isn't cached
+                log.error("%s isn't set up in Fineract (run underwriting/bootstrap.py): %s", REVIEW_TABLE, e.message)
+                return False
+
+        return bool(await self._cached(f"table:{REVIEW_TABLE}", 60, check))
+
+    async def _review(self, cred: str, loan_id: int) -> LoanReview | None:
+        """The officer's review, or None when it can't be read (table missing or no permission): the API then
+        refuses to send up or decide the loan, saying why, instead of treating it as not yet reviewed."""
+        if not await self._has_review_table(cred):
+            return None
+        try:
+            row = await self._datatable(cred, REVIEW_TABLE, loan_id)
+        except BackendError as e:
+            if isinstance(e, AuthFailed) or e.status == 401:  # the staff session ended: say so, don't hide it
+                raise
+            log.warning("Could not read %s for loan %s: %s", REVIEW_TABLE, loan_id, e.message)
+            return None
+        if not row or row.get("stage") not in ("DRAFT", "SUBMITTED", "RETURNED"):
+            return LoanReview()
+        return LoanReview(
+            stage=row["stage"],
+            officer_recommendation=row.get("officer_recommendation") or None,
+            officer_amount=dec(row["officer_amount"]) if row.get("officer_amount") is not None else None,
+            officer_note=row.get("officer_note"),
+            submitted_by=row.get("submitted_by"),
+            submitted_user=row.get("submitted_user"),
+            submitted_on=fdate(row.get("submitted_on")),
+            returned_note=row.get("returned_note"),
+            returned_by=row.get("returned_by"),
+            returned_on=fdate(row.get("returned_on")),
+        )
+
+    async def save_review(self, cred: str, loan_id: int, review: LoanReview) -> None:
+        values = review.model_dump()
+        for k in ("submitted_on", "returned_on"):
+            values[k] = values[k].isoformat() if values[k] else None
+        await self._upsert(cred, REVIEW_TABLE, loan_id, values, clear_empty=True)
+        self._invalidate()
 
     async def _schedule(self, cred: str, loan_id: int) -> tuple[dict, list[Installment]]:
         raw = await self._get(cred, f"/loans/{loan_id}?associations=repaymentSchedule,transactions")
@@ -281,28 +383,16 @@ class FineractBackend:
     async def get_loan(self, cred: str, loan_id: int, today: date) -> LoanDetail:
         raw, inst = await self._schedule(cred, loan_id)
         client_id = int(raw["clientId"])
-        client, fin, ids, a = await asyncio.gather(
-            self._get(cred, f"/clients/{client_id}"),
-            self._datatable(cred, BORROWER_TABLE, client_id),
-            self._get(cred, f"/clients/{client_id}/identifiers"),
+        pending = int((raw.get("status") or {}).get("id") or 0) == 100 and cred != "portal"
+        borrower, a, notes, review = await asyncio.gather(
+            self._borrower(cred, client_id),
             self._datatable(cred, ASSESSMENT_TABLE, loan_id),
-        )
-        fin = fin or {}
-        borrower = Borrower(
-            id=client_id,
-            name=client.get("displayName", ""),
-            phone=normalise_phone(client.get("mobileNo") or "") or None,
-            national_id=(ids[0].get("documentKey") if ids else None),
-            employer=fin.get("income_source"),
-            monthly_income=dec(fin["monthly_income"]) if fin.get("monthly_income") is not None else None,
-            existing_monthly_debt=dec(fin.get("existing_monthly_debt")),
-            credit_score=int(fin["credit_score"]) if fin.get("credit_score") not in (None, "") else None,
-            monthly_business_noi=dec(fin["monthly_business_noi"])
-            if fin.get("monthly_business_noi") not in (None, "")
-            else None,
-            income_verified=fin.get("income_verified"),
+            self._loan_notes(cred, loan_id),
+            self._review(cred, loan_id) if pending else _none(),
         )
         s = self._summary(raw, today, a)
+        if review:
+            s.review_stage = review.stage
         unpaid = [i for i in inst if not i.complete]
         nxt = unpaid[0] if unpaid and s.state in LIVE else None
         assessment = None
@@ -327,12 +417,22 @@ class FineractBackend:
             (tl.get("actualDisbursementDate"), "Disbursed", tl.get("disbursedByUsername")),
             (tl.get("closedOnDate"), "Closed", tl.get("closedByUsername")),
         ]
-        history = [LoanEvent(when=fdate(d).isoformat(), text=t, who=w) for d, t, w in events if fdate(d)]  # type: ignore[union-attr]
+        # Fineract's timeline has dates only. Within a day: submitted and approved come before that day's notes
+        # (contact, signed copy), which come before a disbursement, rejection or closing.
+        rank = {"Application submitted": 0, "Approved": 1, "Rejected": 3, "Disbursed": 3, "Closed": 4}
+        keyed = [
+            ((fdate(d).isoformat(), rank[t], ""), LoanEvent(when=fdate(d).isoformat(), text=t, who=w))  # type: ignore[union-attr]
+            for d, t, w in events
+            if fdate(d)
+        ] + [((e.when, 2, order), e) for order, e in notes]
+        history = [e for _, e in sorted(keyed, key=lambda pair: pair[0])]
         payments = [
             Payment(
+                id=int(t["id"]) if t.get("id") is not None else None,
                 paid_on=req_date(t.get("date"), "repayment"),
                 amount=dec(t.get("amount")),
                 method=((t.get("paymentDetailData") or {}).get("paymentType") or {}).get("name", "Repayment"),
+                reference=(t.get("paymentDetailData") or {}).get("receiptNumber"),
             )
             for t in reversed(raw.get("transactions") or [])
             if (t.get("type") or {}).get("repayment") and not t.get("manuallyReversed")
@@ -343,6 +443,7 @@ class FineractBackend:
             next_due_amount=(nxt.total - nxt.paid) if nxt else None,
             interest_method="FLAT" if (raw.get("interestType") or {}).get("id") == 1 else "DECLINING_BALANCE",
             repayments_per_year=repayments_per_year(raw),
+            approved_on=fdate(tl.get("approvedOnDate")),
             borrower=borrower,
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),
@@ -350,6 +451,7 @@ class FineractBackend:
             history=list(reversed(history)),
             payments=payments,
             payment_reference=f"BL{raw.get('accountNo', loan_id)}",
+            review=review,
         )
 
     async def save_assessment(self, cred: str, loan_id: int, assessment: Assessment) -> None:
@@ -408,9 +510,18 @@ class FineractBackend:
             )
         return ActionResult(loan_id=loan_id, state="REJECTED", message="Application rejected.")
 
-    async def disburse(self, cred: str, loan_id: int, today: date) -> ActionResult:
+    async def disburse(self, cred: str, loan_id: int, body: DisburseIn, today: date) -> ActionResult:
+        details: dict[str, Any] = {
+            "paymentTypeId": await self._payment_type_id(cred, body.method),
+            "receiptNumber": body.reference,
+            "note": f"Paid out in McLender ({body.method}), reference {body.reference}",
+        }
+        if body.account:
+            details["accountNumber"] = body.account
         result = await self._post(
-            cred, f"/loans/{loan_id}?command=disburse", {**DATE_FMT, "actualDisbursementDate": today.isoformat()}
+            cred,
+            f"/loans/{loan_id}?command=disburse",
+            {**DATE_FMT, "actualDisbursementDate": today.isoformat(), **details},
         )
         self._invalidate()
         if self._pending_checker(result):
@@ -418,6 +529,58 @@ class FineractBackend:
                 loan_id=loan_id, state="APPROVED", message="Disbursement saved. A second approver must confirm it."
             )
         return ActionResult(loan_id=loan_id, state="ACTIVE", message="Loan disbursed.")
+
+    async def _loan_notes(self, cred: str, loan_id: int) -> list[tuple[str, LoanEvent]]:
+        """Loan notes (contact log, signed agreement, purpose) for the loan's history, each with a sort key
+        (full timestamp, then id). Never blocks loading a loan: notes are extra information."""
+        if cred == "portal":  # borrowers don't see the loan history, and the portal user can't read notes
+            return []
+        try:
+            raws = await self._get(cred, f"/loans/{loan_id}/notes")
+        except BackendError as e:
+            log.warning("Could not read notes for loan %s: %s", loan_id, e.message)
+            return []
+        out = []
+        for n in raws or []:
+            text = (n.get("note") or "").strip()
+            when = _note_time(n.get("createdOn"), self._zone)
+            # Skip notes McLender writes on transactions; the transactions show in history already.
+            if not text or when is None or text.startswith(("Recorded in McLender", "Paid out in McLender")):
+                continue
+            order = f"{when.isoformat()}#{int(n.get('id') or 0):012d}"
+            out.append((order, LoanEvent(when=when.date().isoformat(), text=text, who=n.get("createdByUsername"))))
+        return out
+
+    async def add_loan_note(self, cred: str, loan_id: int, text: str, today: date) -> None:
+        await self._post(cred, f"/loans/{loan_id}/notes", {"note": text[:1000]})
+
+    async def list_loan_documents(self, cred: str, loan_id: int) -> list[BorrowerDocument]:
+        raws = await self._get(cred, f"/loans/{loan_id}/documents")
+        return sorted((self._document(r) for r in raws or []), key=lambda d: d.id, reverse=True)
+
+    async def add_loan_document(
+        self, cred: str, loan_id: int, kind: str, file_name: str, content_type: str, data: bytes, today: date
+    ) -> BorrowerDocument:
+        resp = await self._send(
+            cred,
+            "POST",
+            f"/loans/{loan_id}/documents",
+            data={"name": kind, "description": f"McLender upload {today.isoformat()}"},
+            files={"file": (file_name, data, content_type)},
+        )
+        return BorrowerDocument(
+            id=int(resp.json()["resourceId"]),
+            kind=cast(DocumentKind, kind),
+            file_name=file_name,
+            content_type=content_type,
+            size=len(data),
+            uploaded_on=today,
+        )
+
+    async def get_loan_document(self, cred: str, loan_id: int, doc_id: int) -> tuple[BorrowerDocument, bytes]:
+        meta = await self._get(cred, f"/loans/{loan_id}/documents/{doc_id}")
+        resp = await self._send(cred, "GET", f"/loans/{loan_id}/documents/{doc_id}/attachment")
+        return self._document(meta), resp.content
 
     async def _live_with_schedules(self, cred: str, today: date) -> list[tuple[dict, list[Installment]]]:
         async def build():
@@ -543,6 +706,7 @@ class FineractBackend:
             reference=body.reference,
             received_on=body.received_on,
             sms_sent_to=detail.borrower.phone,
+            payment_id=int(result["resourceId"]) if (result or {}).get("resourceId") else None,
         )
 
     # ------------------------------------------------------------- portal
@@ -563,10 +727,6 @@ class FineractBackend:
         return [await self.get_loan("portal", i, today) for i in ids]
 
     async def submit_application(self, borrower_id: int, body: PortalApplicationIn, today: date) -> LoanSummary:
-        pid = self.s.portal_product_id
-        tpl = await self._get(
-            "portal", f"/loans/template?templateType=individual&clientId={borrower_id}&productId={pid}"
-        )
         await self._upsert(
             "portal",
             BORROWER_TABLE,
@@ -577,18 +737,23 @@ class FineractBackend:
                 "income_verified": False,
             },
         )
+        return await self._submit_loan("portal", borrower_id, body.amount, body.months, today)
+
+    async def _submit_loan(self, cred: str, borrower_id: int, amount: Decimal, months: int, today: date) -> LoanSummary:
+        pid = self.s.portal_product_id
+        tpl = await self._get(cred, f"/loans/template?templateType=individual&clientId={borrower_id}&productId={pid}")
         result = await self._post(
-            "portal",
+            cred,
             "/loans",
             {
                 **DATE_FMT,
                 "loanType": "individual",
                 "clientId": borrower_id,
                 "productId": pid,
-                "principal": str(body.amount),
-                "loanTermFrequency": body.months,
+                "principal": str(amount),
+                "loanTermFrequency": months,
                 "loanTermFrequencyType": 2,
-                "numberOfRepayments": body.months,
+                "numberOfRepayments": months,
                 "repaymentEvery": 1,
                 "repaymentFrequencyType": 2,
                 "interestRatePerPeriod": tpl.get("interestRatePerPeriod"),
@@ -603,5 +768,403 @@ class FineractBackend:
             },
         )
         self._invalidate()
-        raw = await self._get("portal", f"/loans/{int(result['loanId'])}")
+        raw = await self._get(cred, f"/loans/{int(result['loanId'])}")
         return self._summary(raw, today)
+
+    # ---------------------------------------------------------- borrowers
+    async def _borrower(self, cred: str, client_id: int) -> Borrower:
+        client, fin, ids, prof = await asyncio.gather(
+            self._get(cred, f"/clients/{client_id}"),
+            self._datatable(cred, BORROWER_TABLE, client_id),
+            self._get(cred, f"/clients/{client_id}/identifiers"),
+            self._profile(cred, client_id),
+        )
+        fin, prof = fin or {}, prof or {}
+        nid = next((i for i in ids or [] if _is_nid((i.get("documentType") or {}).get("name", ""))), None)
+        gender = ((client.get("gender") or {}).get("name") or "").strip().lower()
+        bank = None
+        if prof.get("bank_name") and prof.get("bank_account_number"):
+            bank = BankAccount(
+                bank=prof["bank_name"],
+                branch=prof.get("bank_branch") or None,
+                account_name=prof.get("bank_account_name") or client.get("displayName", ""),
+                account_number=prof["bank_account_number"],
+            )
+        nok = None
+        if prof.get("nok_name") and prof.get("nok_phone"):
+            nok = NextOfKin(
+                name=prof["nok_name"], relationship=prof.get("nok_relationship") or "-", phone=prof["nok_phone"]
+            )
+        return Borrower(
+            id=client_id,
+            name=client.get("displayName", ""),
+            first_name=client.get("firstname"),
+            last_name=client.get("lastname"),
+            phone=normalise_phone(client.get("mobileNo") or "") or None,
+            national_id=nid.get("documentKey") if nid else None,
+            employer=prof.get("employer") or fin.get("income_source"),
+            address=prof.get("address"),
+            date_of_birth=fdate(client.get("dateOfBirth")),
+            gender="female" if gender.startswith("f") else "male" if gender.startswith("m") else None,
+            payroll_number=prof.get("payroll_number"),
+            bank=bank,
+            next_of_kin=nok,
+            monthly_income=dec(fin["monthly_income"]) if fin.get("monthly_income") is not None else None,
+            existing_monthly_debt=dec(fin.get("existing_monthly_debt")),
+            credit_score=int(fin["credit_score"]) if fin.get("credit_score") not in (None, "") else None,
+            monthly_business_noi=dec(fin["monthly_business_noi"])
+            if fin.get("monthly_business_noi") not in (None, "")
+            else None,
+            income_verified=fin.get("income_verified"),
+            has_photo=bool(client.get("imagePresent") or client.get("imageId")),
+        )
+
+    async def _profile(self, cred: str, client_id: int) -> dict | None:
+        try:
+            return await self._datatable(cred, PROFILE_TABLE, client_id)
+        except BackendError as e:
+            if e.status == 403:  # the portal user may not read bank and next-of-kin details
+                return None
+            raise
+
+    async def _code_values(self, cred: str, code_name: str) -> dict[str, int]:
+        async def load() -> dict[str, int]:
+            codes = await self._get(cred, "/codes")
+            code = next((c for c in codes if c.get("name", "").lower() == code_name.lower()), None)
+            if not code:
+                return {}
+            values = await self._get(cred, f"/codes/{code['id']}/codevalues")
+            return {v["name"].strip().lower(): int(v["id"]) for v in values}
+
+        return await self._cached(f"code:{code_name}", 600, load)
+
+    async def _client_index(self, cred: str) -> list[dict]:
+        """Every client this user may see (id, name, phone), kept for a minute so searching as you type is quick.
+
+        Fineract's own search is an SQL LIKE, which is case-sensitive on PostgreSQL and needs the words
+        in order, so McLender matches names itself (see domain/search.py)."""
+        who = hashlib.sha256(cred.encode()).hexdigest()
+
+        async def load() -> list[dict]:
+            out: list[dict] = []
+            page_size = 500
+            while len(out) < 20000:
+                page = await self._get(
+                    cred, f"/clients?offset={len(out)}&limit={page_size}&orderBy=displayName&sortOrder=ASC"
+                )
+                items = page.get("pageItems", []) if isinstance(page, dict) else []
+                out.extend(
+                    {"id": int(c["id"]), "name": c.get("displayName") or "", "phone": c.get("mobileNo")} for c in items
+                )
+                if len(items) < page_size:
+                    break
+            return out
+
+        key = f"clients:{who}"
+        # One load at a time per user: searching as you type mustn't start a full load per keystroke.
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            return await self._cached(key, 60, load)
+
+    async def _nid_hits(self, cred: str, query: str) -> dict[int, str]:
+        """Clients whose NID holds the digits typed, however they were spaced or dashed."""
+        run = "".join(c for c in query if c.isdigit())
+        groups = re.findall(r"\d+", query)
+        if len(run) < 4 or not groups:
+            return {}
+        probe = max(groups, key=len)  # one group as Fineract stored it; the full number is checked below
+        try:
+            hits = await self._get(cred, f"/search?query={quote(probe)}&resource=clientIdentifiers&exactMatch=false")
+        except BackendError as e:  # names and phone numbers still work
+            log.warning("NID search failed: %s", e.message)
+            return {}
+        out: dict[int, str] = {}
+        for h in hits or []:
+            owner = int(h.get("parentId") or 0)
+            nid = h.get("entityName") or ""
+            if owner and run in "".join(c for c in nid if c.isdigit()):
+                out[owner] = nid
+        return out
+
+    async def search_borrowers(self, cred: str, query: str, limit: int = 50) -> list[BorrowerListItem]:
+        clients, nids = await asyncio.gather(self._client_index(cred), self._nid_hits(cred, query))
+        just_a_number = bool(re.fullmatch(r"[\d\s-]+", query.strip()))
+
+        def score(c: dict) -> int:
+            if just_a_number and c["id"] in nids:
+                return 100  # the NID typed in full: put that person first
+            return match_score(query, c["name"], (), [c["phone"], nids.get(c["id"])])
+
+        hits = rank(query, clients, score, lambda c: c["name"], limit)
+        return [
+            BorrowerListItem(id=c["id"], name=c["name"], phone=c["phone"], national_id=nids.get(c["id"])) for c in hits
+        ]
+
+    async def get_borrower(self, cred: str, borrower_id: int) -> Borrower:
+        return await self._borrower(cred, borrower_id)
+
+    def _client_body(self, body: BorrowerIn, gender_id: int | None) -> dict:
+        out: dict[str, Any] = {
+            **DATE_FMT,
+            "firstname": body.first_name,
+            "lastname": body.last_name,
+            "mobileNo": normalise_phone(body.phone),
+            "dateOfBirth": body.date_of_birth.isoformat(),
+        }
+        if gender_id:
+            out["genderId"] = gender_id
+        return out
+
+    async def _gender_id(self, cred: str, gender: str) -> int | None:
+        values = await self._code_values(cred, "Gender")
+        return next((v for k, v in values.items() if k.startswith(gender[0])), None)
+
+    async def _nid_type(self, cred: str) -> int:
+        types = await self._code_values(cred, "Customer Identifier")
+        type_id = next((v for k, v in types.items() if _is_nid(k)), None)
+        if type_id is None:
+            raise BackendError(
+                'Add a "National ID (NID)" value to the Customer Identifier code in Fineract '
+                "(Admin > System > Manage codes), then try again.",
+                422,
+            )
+        return type_id
+
+    async def _check_unique(self, cred: str, body: BorrowerIn, except_id: int | None = None) -> None:
+        """Refuse a phone number or NID that another borrower already has, naming them, before anything
+        is written (Fineract would otherwise create the client and then refuse the identifier)."""
+        phone = normalise_phone(body.phone)
+        hits = await self._get(cred, f"/search?query={quote(phone)}&resource=clients&exactMatch=false")
+        for h in hits or []:
+            cid = int(h.get("entityId") or 0)
+            if (h.get("entityType") or "").upper() != "CLIENT" or cid == except_id:
+                continue
+            client = await self._get(cred, f"/clients/{cid}")
+            if normalise_phone(client.get("mobileNo") or "") == phone:
+                raise BackendError(
+                    f"{client.get('displayName', 'Another borrower')} already has phone number {phone}.", 409
+                )
+        if body.national_id:
+            key = _nid_key(body.national_id)
+            # Search by one group as Fineract may have stored it ("2009 1182 4410", "2009-1182-4410"),
+            # then compare the normalised numbers.
+            groups = re.findall(r"[0-9A-Za-z]+", body.national_id)
+            probe = max(groups, key=len) if groups else body.national_id
+            hits = await self._get(cred, f"/search?query={quote(probe)}&resource=clientIdentifiers&exactMatch=false")
+            for h in hits or []:
+                owner = int(h.get("parentId") or 0)
+                if owner and owner != except_id and _nid_key(h.get("entityName") or "") == key:
+                    raise BackendError(
+                        f"{h.get('parentName', 'Another borrower')} already has NID number {body.national_id}.", 409
+                    )
+
+    async def _save_details(self, cred: str, client_id: int, body: BorrowerIn, new: bool) -> None:
+        if body.national_id:
+            type_id = await self._nid_type(cred)
+            existing = [] if new else await self._get(cred, f"/clients/{client_id}/identifiers")
+            current = next((i for i in existing if (i.get("documentType") or {}).get("id") == type_id), None)
+            ident = {"documentTypeId": type_id, "documentKey": body.national_id, "status": "Active"}
+            if current is None:
+                await self._post(cred, f"/clients/{client_id}/identifiers", ident)
+            elif current.get("documentKey") != body.national_id:
+                await self._req(cred, "PUT", f"/clients/{client_id}/identifiers/{current['id']}", ident)
+        bank, nok = body.bank, body.next_of_kin
+        await self._upsert(
+            cred,
+            PROFILE_TABLE,
+            client_id,
+            {
+                "address": body.address,
+                "employer": body.employer,
+                "payroll_number": body.payroll_number,
+                "bank_name": bank.bank if bank else None,
+                "bank_branch": bank.branch if bank else None,
+                "bank_account_name": bank.account_name if bank else None,
+                "bank_account_number": bank.account_number if bank else None,
+                "nok_name": nok.name if nok else None,
+                "nok_relationship": nok.relationship if nok else None,
+                "nok_phone": normalise_phone(nok.phone) if nok else None,
+            },
+            clear_empty=True,  # removing a bank account or next of kin in McLender must remove it here too
+        )
+        if body.monthly_income is not None:
+            await self._upsert(
+                cred,
+                BORROWER_TABLE,
+                client_id,
+                {
+                    "monthly_income": body.monthly_income,
+                    "existing_monthly_debt": body.existing_monthly_debt,
+                    "income_source": body.employer,
+                },
+            )
+
+    async def create_borrower(self, cred: str, body: BorrowerIn, today: date) -> Borrower:
+        await self._check_unique(cred, body)
+        if body.national_id:
+            await self._nid_type(cred)  # fail before creating anything if the NID type isn't set up
+        result = await self._post(
+            cred,
+            "/clients",
+            {
+                **self._client_body(body, await self._gender_id(cred, body.gender)),
+                "officeId": 1,
+                "legalFormId": 1,
+                "active": True,
+                "activationDate": today.isoformat(),
+                "submittedOnDate": today.isoformat(),
+            },
+        )
+        client_id = int(result.get("clientId") or result["resourceId"])
+        try:
+            await self._save_details(cred, client_id, body, new=True)
+        except BackendError as e:
+            raise BackendError(
+                f"The borrower was created (number {client_id}) but some details weren't saved: {e.message} "
+                "Open the borrower and save again.",
+                e.status,
+            ) from e
+        self._invalidate()
+        return await self._borrower(cred, client_id)
+
+    async def update_borrower(self, cred: str, borrower_id: int, body: BorrowerIn) -> Borrower:
+        await self._check_unique(cred, body, except_id=borrower_id)
+        await self._req(
+            cred, "PUT", f"/clients/{borrower_id}", self._client_body(body, await self._gender_id(cred, body.gender))
+        )
+        await self._save_details(cred, borrower_id, body, new=False)
+        self._invalidate()
+        return await self._borrower(cred, borrower_id)
+
+    async def borrower_loan_list(self, cred: str, borrower_id: int, today: date) -> list[LoanSummary]:
+        accounts = await self._get(cred, f"/clients/{borrower_id}/accounts")
+        ids = [int(a["id"]) for a in (accounts or {}).get("loanAccounts", [])]
+        raws = await asyncio.gather(*(self._get(cred, f"/loans/{i}") for i in ids))
+        return sorted((self._summary(r, today) for r in raws), key=lambda s: s.id, reverse=True)
+
+    @staticmethod
+    def _document(raw: dict) -> BorrowerDocument:
+        kind = (raw.get("name") or "").strip().lower()
+        found = re.search(r"\d{4}-\d{2}-\d{2}", raw.get("description") or "")
+        return BorrowerDocument(
+            id=int(raw["id"]),
+            kind=cast(DocumentKind, kind if kind in DOCUMENT_LABELS else "other"),
+            file_name=raw.get("fileName") or "document",
+            content_type=raw.get("type") or "application/octet-stream",
+            size=int(raw.get("size") or 0),
+            uploaded_on=date.fromisoformat(found.group(0)) if found else None,
+        )
+
+    async def list_documents(self, cred: str, borrower_id: int) -> list[BorrowerDocument]:
+        raws = await self._get(cred, f"/clients/{borrower_id}/documents")
+        return sorted((self._document(r) for r in raws or []), key=lambda d: d.id, reverse=True)
+
+    async def add_document(
+        self, cred: str, borrower_id: int, kind: str, file_name: str, content_type: str, data: bytes, today: date
+    ) -> BorrowerDocument:
+        resp = await self._send(
+            cred,
+            "POST",
+            f"/clients/{borrower_id}/documents",
+            data={"name": kind, "description": f"McLender upload {today.isoformat()}"},
+            files={"file": (file_name, data, content_type)},
+        )
+        doc_id = int(resp.json()["resourceId"])
+        return BorrowerDocument(
+            id=doc_id,
+            kind=cast(DocumentKind, kind),
+            file_name=file_name,
+            content_type=content_type,
+            size=len(data),
+            uploaded_on=today,
+        )
+
+    async def get_document(self, cred: str, borrower_id: int, doc_id: int) -> tuple[BorrowerDocument, bytes]:
+        meta = await self._get(cred, f"/clients/{borrower_id}/documents/{doc_id}")
+        resp = await self._send(cred, "GET", f"/clients/{borrower_id}/documents/{doc_id}/attachment")
+        return self._document(meta), resp.content
+
+    async def set_photo(self, cred: str, borrower_id: int, jpeg: bytes) -> None:
+        """The client's picture in Mifos X (shown on the client page there too)."""
+        await self._send(
+            cred, "POST", f"/clients/{borrower_id}/images", files={"file": ("photo.jpg", jpeg, "image/jpeg")}
+        )
+        self._invalidate()
+
+    async def get_photo(self, cred: str, borrower_id: int) -> bytes | None:
+        try:
+            resp = await self._send(cred, "GET", f"/clients/{borrower_id}/images", accept="text/plain")
+        except NotFound:
+            return None
+        body = resp.content
+        if body.startswith(b"data:"):  # Fineract answers with a data URL by default
+            try:
+                return base64.b64decode(body.split(b",", 1)[1], validate=False)
+            except (IndexError, ValueError):
+                return None
+        return body or None
+
+    async def delete_document(self, cred: str, borrower_id: int, doc_id: int) -> None:
+        await self._req(cred, "DELETE", f"/clients/{borrower_id}/documents/{doc_id}")
+
+    async def delete_loan_document(self, cred: str, loan_id: int, doc_id: int) -> None:
+        await self._req(cred, "DELETE", f"/loans/{loan_id}/documents/{doc_id}")
+
+    async def add_client_note(self, cred: str, borrower_id: int, text: str, today: date) -> None:
+        await self._post(cred, f"/clients/{borrower_id}/notes", {"note": text[:1000]})
+
+    async def client_notes(self, cred: str, borrower_id: int) -> list[LoanEvent]:
+        try:
+            raws = await self._get(cred, f"/clients/{borrower_id}/notes")
+        except BackendError as e:
+            log.warning("Could not read notes for client %s: %s", borrower_id, e.message)
+            return []
+        keyed = []
+        for n in raws or []:
+            when = _note_time(n.get("createdOn"), self._zone)
+            if when and n.get("note"):
+                event = LoanEvent(when=when.date().isoformat(), text=n["note"], who=n.get("createdByUsername"))
+                keyed.append(((when.isoformat(), int(n.get("id") or 0)), event))
+        return [e for _, e in sorted(keyed, key=lambda p: p[0], reverse=True)]
+
+    async def create_application(self, cred: str, borrower_id: int, body: ApplicationIn, today: date) -> LoanSummary:
+        accounts = await self._get(cred, f"/clients/{borrower_id}/accounts")
+        if any(int((a.get("status") or {}).get("id", 0)) == 100 for a in (accounts or {}).get("loanAccounts", [])):
+            raise BackendError("This borrower already has an application waiting for a decision.", 409)
+        summary = await self._submit_loan(cred, borrower_id, body.amount, body.months, today)
+        if body.purpose:
+            try:
+                await self._post(cred, f"/loans/{summary.id}/notes", {"note": f"Purpose: {body.purpose}"})
+            except BackendError as e:  # the application stands even if the note can't be saved
+                log.warning("Could not save the purpose note on loan %s: %s", summary.id, e.message)
+        return summary
+
+
+def _note_time(v: Any, zone: tzinfo) -> datetime | None:
+    """A note's creation time in local (Port Moresby) time. Fineract stores it in UTC and sends it as
+    epoch milliseconds, an ISO date-time, or [y, m, d, h, min, s], depending on version. A date alone
+    is taken as that local day."""
+    try:
+        if isinstance(v, int | float):
+            return datetime.fromtimestamp(v / 1000, tz=UTC).astimezone(zone)
+        if isinstance(v, list | tuple) and len(v) >= 3:
+            if len(v) < 4:
+                return datetime(int(v[0]), int(v[1]), int(v[2]), 12, tzinfo=zone)
+            y, mo, d, h, mi, sec = ([int(x) for x in v[:6]] + [0, 0, 0])[:6]
+            return datetime(y, mo, d, h, mi, sec, tzinfo=UTC).astimezone(zone)
+        if isinstance(v, str) and v:
+            if len(v) <= 10:
+                return datetime.fromisoformat(v).replace(hour=12, tzinfo=zone)
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).astimezone(zone)
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def _nid_key(nid: str) -> str:
+    return "".join(c for c in nid if c.isalnum()).lower()
+
+
+def _is_nid(name: str) -> bool:
+    n = name.lower()
+    return "national" in n or "nid" in n

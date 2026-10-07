@@ -6,7 +6,8 @@ McLender is a staff app and a borrower portal on top of [Apache Fineract](https:
 
 | | What it does |
 |---|---|
-| **Staff app** `/staff` | Dashboard (portfolio, PAR30, arrears by age, due today), loan applications with the affordability check, approve or reject with a reason, record disbursement, collections list, record repayments by cash, bank transfer, mobile money or payroll, with an SMS receipt |
+| **Staff app** `/staff` | Dashboard (portfolio, PAR30, arrears by age, due today), borrower sign-up with KYC documents (ID, payslips, bank statement, payroll deduction authority), loan applications with the affordability check, approve (only with documents on file) or reject with a reason, record disbursement, collections list, record repayments by cash, bank transfer, mobile money or payroll, with an SMS receipt |
+| **Printed documents** | Loan agreement (draft wording for a lawyer to review), repayment schedule, statement and receipts as PDF |
 | **Borrower portal** `/portal` | Sign in with phone number and SMS code, see what is left to pay and when, how to pay with a payment reference, payment history, loan quote and application. Installable on a phone (PWA) |
 | **Affordability check** | Debt-to-income, debt service cover, credit score and a 0–100 risk score, giving APPROVE, REFER or DECLINE. It recommends only; a credit manager decides |
 
@@ -50,6 +51,9 @@ Sample data resets every time the API restarts.
 
 ## Run it for real (with Fineract)
 
+**Testing on one PC first:** follow [docs/LIVE-TESTING.md](docs/LIVE-TESTING.md). A script sets up Fineract with test users, a loan product and borrowers.
+
+
 1. Follow [deploy/](deploy/) and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) to start Fineract and set up the products, chart of accounts and payment types (`Cash`, `Bank Transfer`, `Mobile Money`, `Payroll Deduction`).
 2. Run `python underwriting/bootstrap.py --gate` once to create the data tables McLender uses.
 3. In Mifos X, create a user `portal` with a role that has only: read client, read client identifier, read loan, read loan product, create loan, and read/create/update on the two data tables (the list is at the top of `api/app/backends/fineract.py`).
@@ -60,9 +64,9 @@ Sample data resets every time the API restarts.
 
 | | Command | Status |
 |---|---|---|
-| API | `cd api && ruff check app tests && mypy app && pytest` | 57 tests pass |
-| Web | `cd web && npm run lint && npm run typecheck && npm test && npm run build` | 12 unit tests pass |
-| End to end | `cd web && npm run build && npm run e2e` | 5 browser tests pass (staff on desktop, portal on a phone) |
+| API | `cd api && ruff check app tests && mypy app && pytest` | 82 tests pass |
+| Web | `cd web && npm run lint && npm run typecheck && npm test && npm run build` | 17 unit tests pass |
+| End to end | `cd web && npm run build && npm run e2e` | 7 browser tests pass (staff and borrowers on desktop, portal on a phone) |
 | CI | `.github/workflows/ci.yml` runs all of the above, plus dependency audits and Docker builds, on every pull request | |
 
 ## Not decided yet (at shipping time)

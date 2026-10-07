@@ -76,7 +76,14 @@ Use **accrual (periodic)** accounting if you report on an accrual basis, otherwi
 - Run `underwriting/bootstrap.py` (see README). It creates:
   - **Borrower financials** on clients: monthly income, existing monthly debt, credit score, business net operating income, income verified, income source.
   - **Loan assessment** on loans: recommendation, risk score, DTI, DSCR, max recommended principal, policy version, date, notes.
+  - **Borrower profile** on clients: address, employer, payroll number, bank account, next of kin.
+  - **Loan review** on loans (`dt_loan_review`): the loan officer's recommendation, amount and note, who sent it for
+    approval and when, and the credit manager's note if sent back. McLender's approve and reject need it.
   - With `--gate`: loans can't be approved until an assessment exists.
+- **Upgrading McLender**: run `underwriting/bootstrap.py` again after each upgrade (it only adds what's missing), and
+  give the staff roles READ, CREATE and UPDATE on any new data table (Admin → Users → Roles → the role → Edit,
+  "datatable" group). `deploy/setup-test.py` does both on a test server. Until `dt_loan_review` exists, McLender
+  refuses to send applications for approval or decide them, with a message saying so.
 
 ## 7. Loan workflow *(brief: state machine)*
 

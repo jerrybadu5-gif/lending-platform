@@ -61,5 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t mclender-api:ci api
+      # Load the app inside the image, so a package missing from the image fails here, not on a server.
+      - run: docker run --rm mclender-api:ci python -c "import app.main"
       - run: docker build -t mclender-web:ci web
       - run: cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml --env-file deploy/.env config -q

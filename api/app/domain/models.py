@@ -6,14 +6,30 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 LoanState = Literal[
     "PENDING", "APPROVED", "REJECTED", "ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED", "WRITTEN_OFF", "WITHDRAWN"
 ]
 Recommendation = Literal["APPROVE", "REFER", "DECLINE"]
+ReviewStage = Literal["DRAFT", "SUBMITTED", "RETURNED"]
+OfficerAdvice = Literal["APPROVE", "DECLINE"]
 InterestMethod = Literal["DECLINING_BALANCE", "FLAT"]
 PaymentMethod = Literal["cash", "bank", "mobile", "payroll"]
+Gender = Literal["female", "male"]
+DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other", "signed_agreement", "receipt"]
+
+DOCUMENT_LABELS: dict[str, str] = {
+    "id": "ID (NID card, passport or driver's licence)",
+    "payslip": "Latest 3 payslips",
+    "bank_statement": "Bank statement (last 3 months)",
+    "deduction_authority": "Payroll deduction authority (signed)",
+    "other": "Other document",
+    "signed_agreement": "Signed loan agreement",
+    "receipt": "Payment receipt",
+}
+# Kinds staff upload on a borrower's profile (signed agreements and receipts belong to a loan).
+BORROWER_DOCUMENT_KINDS = {"id", "payslip", "bank_statement", "deduction_authority", "other"}
 
 
 class StaffUser(BaseModel):
@@ -22,18 +38,39 @@ class StaffUser(BaseModel):
     roles: list[str] = []
 
 
+class NextOfKin(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    relationship: str = Field(min_length=2, max_length=40)
+    phone: str = Field(min_length=7, max_length=20)
+
+
+class BankAccount(BaseModel):
+    bank: str = Field(min_length=2, max_length=60)
+    branch: str | None = Field(default=None, max_length=60)
+    account_name: str = Field(min_length=2, max_length=100)
+    account_number: str = Field(pattern=r"^[0-9 -]{4,30}$")
+
+
 class Borrower(BaseModel):
     id: int
     name: str
+    first_name: str | None = None  # as stored, so editing never re-splits the display name
+    last_name: str | None = None
     phone: str | None = None
     national_id: str | None = None
     employer: str | None = None
     address: str | None = None
+    date_of_birth: date | None = None
+    gender: Gender | None = None
+    payroll_number: str | None = None
+    bank: BankAccount | None = None
+    next_of_kin: NextOfKin | None = None
     monthly_income: Decimal | None = None
     existing_monthly_debt: Decimal | None = None
     credit_score: int | None = None
     monthly_business_noi: Decimal | None = None
     income_verified: bool | None = None
+    has_photo: bool = False
 
 
 class Installment(BaseModel):
@@ -78,12 +115,15 @@ class LoanSummary(BaseModel):
     next_due_amount: Decimal | None = None
     submitted_on: date | None = None
     recommendation: Recommendation | None = None
+    review_stage: ReviewStage | None = None  # pending loans only: where the officer's review is
 
 
 class Payment(BaseModel):
+    id: int | None = None  # Fineract transaction id; used to print a receipt again
     paid_on: date
     amount: Decimal
     method: str
+    reference: str | None = None
 
 
 class LoanEvent(BaseModel):
@@ -92,7 +132,33 @@ class LoanEvent(BaseModel):
     who: str | None = None
 
 
+class LoanReview(BaseModel):
+    """The loan officer's review of a pending application, and the credit manager's reply if sent back."""
+
+    stage: ReviewStage = "DRAFT"
+    officer_recommendation: OfficerAdvice | None = None
+    officer_amount: Decimal | None = None
+    officer_note: str | None = None
+    submitted_by: str | None = None
+    submitted_user: str | None = None  # username, to stop someone approving what they sent up themselves
+    submitted_on: date | None = None
+    returned_note: str | None = None
+    returned_by: str | None = None
+    returned_on: date | None = None
+
+
+class SubmitIn(BaseModel):
+    recommendation: OfficerAdvice
+    amount: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    note: str = Field(min_length=10, max_length=1000)
+
+
+class ReturnIn(BaseModel):
+    note: str = Field(min_length=3, max_length=1000)
+
+
 class LoanDetail(LoanSummary):
+    approved_on: date | None = None
     interest_method: InterestMethod = "DECLINING_BALANCE"
     repayments_per_year: Decimal = Decimal(12)  # 12 monthly, 26 fortnightly, 52 weekly
     borrower: Borrower
@@ -102,6 +168,7 @@ class LoanDetail(LoanSummary):
     history: list[LoanEvent] = []
     payments: list[Payment] = []
     payment_reference: str
+    review: LoanReview | None = None  # pending loans only
 
 
 class Dashboard(BaseModel):
@@ -163,12 +230,144 @@ class Receipt(BaseModel):
     reference: str
     received_on: date
     sms_sent_to: str | None = None
+    payment_id: int | None = None  # for printing the receipt as a PDF
+    filed: bool = False  # a PDF copy was saved on the loan
+
+
+class DisburseIn(BaseModel):
+    """How the money was paid out to the borrower."""
+
+    method: Literal["bank", "mobile", "cash"] = "bank"
+    reference: str = Field(min_length=2, max_length=60)  # bank transfer / mobile money receipt / cash voucher
+    account: str | None = Field(default=None, max_length=40)  # account or wallet paid into
+
+
+class ContactIn(BaseModel):
+    """Telling the borrower their loan is approved and the agreement is ready to sign."""
+
+    channel: Literal["sms", "phone"]
+    note: str = Field(default="", max_length=300)
+
+
+class PayoutStatus(BaseModel):
+    """Where an approved loan is in the pay-out steps: agreement printed, borrower told, signed copy
+    uploaded, then pay out."""
+
+    loan_id: int
+    borrower_told: list[LoanEvent] = []
+    told_done: bool = False  # a delivered SMS or a logged phone call
+    sms_delivers: bool = True  # False while there is no SMS provider (messages only go to the log)
+    payout_pending: bool = False  # a pay-out was recorded and waits for a second approver in Fineract
+    signed_agreement: BorrowerDocument | None = None
+    bank: BankAccount | None = None
+    phone: str | None = None
+    ready: bool = False
+    missing: list[str] = []
 
 
 class ActionResult(BaseModel):
     loan_id: int
     state: LoanState
     message: str
+
+
+# --- Borrowers and KYC --------------------------------------------------------
+
+
+class BorrowerIn(BaseModel):
+    """A new borrower, or changes to one. Staff enter this when signing someone up."""
+
+    first_name: str = Field(min_length=1, max_length=50)
+    last_name: str = Field(min_length=1, max_length=50)
+    phone: str = Field(min_length=7, max_length=20)
+    date_of_birth: date
+    gender: Gender
+    address: str = Field(min_length=3, max_length=200)
+    national_id: str | None = Field(default=None, pattern=r"^[0-9A-Za-z -]{4,30}$")
+    employer: str | None = Field(default=None, max_length=100)
+    payroll_number: str | None = Field(default=None, max_length=30)
+    monthly_income: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+    existing_monthly_debt: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
+    bank: BankAccount | None = None
+    next_of_kin: NextOfKin | None = None
+
+    @field_validator("first_name", "last_name", "address", "employer", "payroll_number", "national_id")
+    @classmethod
+    def _strip(cls, v: str | None) -> str | None:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _adult(cls, v: date) -> date:
+        today = date.today()
+        age = today.year - v.year - ((today.month, today.day) < (v.month, v.day))
+        if age < 18:
+            raise ValueError("Borrowers must be 18 or older.")
+        if age > 100:
+            raise ValueError("Check the date of birth.")
+        return v
+
+    @property
+    def name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+
+
+class BorrowerDocument(BaseModel):
+    id: int
+    kind: DocumentKind
+    file_name: str
+    content_type: str
+    size: int
+    uploaded_on: date | None = None
+
+
+class KycStatus(BaseModel):
+    complete: bool
+    missing: list[str] = []  # labels of the document kinds still needed
+    have: dict[str, int] = {}  # documents on file, by kind
+
+
+class BorrowerListItem(BaseModel):
+    id: int
+    name: str
+    phone: str | None = None
+    national_id: str | None = None
+    employer: str | None = None
+
+
+class RemoveIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class BorrowerProfile(BaseModel):
+    borrower: Borrower
+    documents: list[BorrowerDocument]
+    kyc: KycStatus
+    loans: list[LoanSummary]
+    notes: list[LoanEvent] = []  # the borrower's file notes, newest first (e.g. documents removed and why)
+
+
+class IdSuggestionsOut(BaseModel):
+    national_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    date_of_birth: date | None = None
+    gender: Gender | None = None
+
+
+class IdScanOut(BaseModel):
+    photo: str | None = None  # data:image/jpeg;base64,... for staff to check before saving
+    suggestions: IdSuggestionsOut
+    text_read: bool
+    problems: list[str] = []
+
+
+class ApplicationIn(BaseModel):
+    """A loan application staff take for a borrower."""
+
+    amount: Decimal = Field(ge=200, le=50000, max_digits=14, decimal_places=2)
+    months: int = Field(ge=1, le=36)
+    purpose: str = Field(default="", max_length=200)
 
 
 # --- Borrower portal ---------------------------------------------------------

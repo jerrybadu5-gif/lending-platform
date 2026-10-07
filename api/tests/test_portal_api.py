@@ -92,5 +92,16 @@ def test_dev_sms_inbox_never_with_fineract():
     from app.config import Settings
     from app.main import create_app
 
-    app = create_app(Settings(backend="fineract", session_secret="s", dev_sms_inbox=True))
+    app = create_app(Settings(backend="fineract", session_secret="s" * 40, dev_sms_inbox=True))
     assert not any(getattr(r, "path", "") == "/api/dev/sms/{phone}" for r in app.routes)
+
+
+def test_fineract_needs_a_real_session_secret():
+    import pytest
+
+    from app.config import Settings
+    from app.main import create_app
+
+    for weak in ("dev-only-change-me", "change-me-to-a-long-random-string", "short"):
+        with pytest.raises(RuntimeError):
+            create_app(Settings(backend="fineract", session_secret=weak))

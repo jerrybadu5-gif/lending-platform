@@ -10,6 +10,7 @@ const icon = (d: string) => (
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
   apps: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/>',
+  people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/>',
   repay: '<rect x="2" y="6" width="20" height="13" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/>',
 }
 
@@ -43,6 +44,7 @@ export function StaffLayout() {
           <NavLink to="/staff/applications">{icon(ICONS.apps)}Applications
             {dash.data && dash.data.pending_count > 0 && <span className="ml-pill ml-pill-info ml-auto">{dash.data.pending_count}</span>}
           </NavLink>
+          <NavLink to="/staff/borrowers">{icon(ICONS.people)}Borrowers</NavLink>
           <NavLink to="/staff/repayments">{icon(ICONS.repay)}Repayments</NavLink>
         </nav>
         <div className="mt-auto px-3 flex flex-col gap-2 text-[13px] leading-[18px] text-ink-muted">

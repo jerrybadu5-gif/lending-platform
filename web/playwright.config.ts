@@ -13,7 +13,7 @@ export default defineConfig({
     launchOptions: process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {},
   },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'] }, testMatch: /staff\.spec/ },
+    { name: 'desktop', use: { ...devices['Desktop Chrome'] }, testMatch: /(staff|borrowers)\.spec/ },
     { name: 'phone', use: { ...devices['Pixel 7'] }, testMatch: /portal\.spec/ },
   ],
   webServer: [

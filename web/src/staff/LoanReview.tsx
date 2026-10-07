@@ -1,10 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { api, type ActionResult, type LoanDetail } from '../api/client'
-import { AssessmentCard, Button, DataTable, ErrorNote, Field, LoanStepper, Money, Skeleton, StatusPill } from '../components'
-import { formatDate, formatKina, parseKina } from '../lib/format'
+import { api, DOCUMENT_LABELS, files, type ActionResult, type LoanDetail } from '../api/client'
+import { AssessmentCard, Button, DataTable, ErrorNote, LoanStepper, Money, Skeleton, StatusPill } from '../components'
+import { formatDate, formatKina } from '../lib/format'
+import { useMe } from '../lib/me'
 import { pillFor, stepFor } from '../lib/loan'
+import { DownloadLink } from '../components/DownloadLink'
+import { PayoutSteps, usePayout } from './Payout'
+import { ManagerDecision, OfficerReview, OfficerSummary, ReviewDocuments, useLoanRefresh } from './Review'
+import { DocumentViewer } from '../components/DocumentViewer'
 
 function suggestedAmount(l: LoanDetail): string {
   const cap = l.assessment ? Number(l.assessment.max_recommended_principal) : Number(l.principal)
@@ -25,6 +30,7 @@ function Review({ loan }: { loan: LoanDetail }) {
   const b = loan.borrower
   const a = loan.assessment
   const rows = showAll ? loan.schedule : loan.schedule.slice(0, 6)
+  const payout = usePayout(loan)
   return (
     <>
       <div className="text-[13px] text-ink-muted"><Link to="/staff/applications">Applications</Link> / <span className="ml-ref">{loan.ref}</span></div>
@@ -39,13 +45,16 @@ function Review({ loan }: { loan: LoanDetail }) {
             {loan.interest_method === 'FLAT' ? 'flat' : 'reducing balance'} · <span className="ml-ref">{loan.ref}</span>
           </div>
         </div>
-        <LoanStepper current={stepFor(loan.state, !!a)} />
+        <LoanStepper current={stepFor(loan.state, !!a, !!payout.data?.signed_agreement)} />
       </header>
 
       <div className="flex flex-wrap gap-6 items-start">
         <div className="flex flex-col gap-6" style={{ flex: '3 1 520px', minWidth: 0 }}>
           <section className="ml-card flex flex-col gap-4">
-            <h2 className="ml-h2">Borrower</h2>
+            <div className="flex flex-wrap justify-between items-center gap-3">
+              <h2 className="ml-h2">Borrower</h2>
+              <Link to={`/staff/borrowers/${b.id}`} className="text-[13px]">Open profile and documents</Link>
+            </div>
             <dl className="grid gap-x-6 gap-y-4 m-0" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
               <Fact k="National ID" v={<span className="ml-ref">{b.national_id ?? '—'}</span>} />
               <Fact k="Phone" v={b.phone ?? '—'} />
@@ -56,6 +65,8 @@ function Review({ loan }: { loan: LoanDetail }) {
               {b.monthly_business_noi && <Fact k="Business net income, monthly" v={formatKina(b.monthly_business_noi)} />}
             </dl>
           </section>
+
+          {['PENDING', 'APPROVED'].includes(loan.state) && <ReviewDocuments borrowerId={b.id} />}
 
           <section className="ml-card p-0 overflow-hidden" style={{ padding: 0 }}>
             <div className="flex flex-wrap justify-between items-center gap-3 px-6 py-4">
@@ -83,6 +94,7 @@ function Review({ loan }: { loan: LoanDetail }) {
           {a && <AssessmentCard recommendation={a.recommendation} score={a.risk_score} dti={a.dti} maxDti={a.max_dti}
             monthlyPayment={a.monthly_payment} cap={a.max_recommended_principal} notes={a.notes} />}
           <Decision loan={loan} />
+          <LoanDocuments loan={loan} />
           <section className="ml-card flex flex-col gap-3">
             <h2 className="ml-h2">History</h2>
             <ol className="m-0 pl-[18px] flex flex-col gap-2 text-[13px] leading-[18px]">
@@ -101,70 +113,94 @@ function Fact({ k, v }: { k: string; v: ReactNode }) {
   return <div><dt className="text-[13px] leading-[18px] text-ink-muted font-medium">{k}</dt><dd className="m-0 mt-0.5">{v}</dd></div>
 }
 
+/** Files kept on the loan in Fineract: the signed agreement and a PDF receipt for each repayment. */
+function FiledDocuments({ loan }: { loan: LoanDetail }) {
+  const q = useQuery({ queryKey: ['loan-documents', loan.id, loan.payments.length], queryFn: () => api.staff.loanDocuments(loan.id) })
+  const [open, setOpen] = useState<number | null>(null)
+  const docs = q.data ?? []
+  const doc = docs.find((d) => d.id === open)
+  if (!docs.length) return null
+  return (
+    <>
+      <h3 className="m-0 text-[13px] font-semibold text-ink-muted">Kept on file</h3>
+      <ul className="m-0 p-0 list-none flex flex-col gap-1.5 text-[13px]">
+        {docs.slice(0, 8).map((d) => (
+          <li key={d.id} className="flex justify-between gap-3">
+            <button className="ml-linkbtn text-left break-all" onClick={() => setOpen(d.id)}>{d.file_name}</button>
+            <span className="text-ink-muted shrink-0">{(DOCUMENT_LABELS[d.kind] ?? 'Document').replace('Payment receipt', 'Receipt')} · {formatDate(d.uploaded_on)}</span>
+          </li>
+        ))}
+      </ul>
+      {doc && <DocumentViewer doc={doc} href={files.loanDocument(loan.id, doc.id)} onClose={() => setOpen(null)}
+        removeNote={doc.kind === 'receipt' ? 'Receipts are part of the payment record and stay on file.'
+          : doc.kind === 'signed_agreement' ? 'A signed agreement can only be removed before pay-out, from the pay-out steps.' : undefined} />}
+    </>
+  )
+}
+
+const AGREEMENT_STATES = ['APPROVED', 'ACTIVE', 'ARREARS', 'ARREARS_LATE', 'CLOSED']
+const STATEMENT_STATES = ['ACTIVE', 'ARREARS', 'ARREARS_LATE', 'CLOSED', 'WRITTEN_OFF']
+
+function LoanDocuments({ loan }: { loan: LoanDetail }) {
+  const links = [
+    // While approved, the agreement is step 1 of the pay-out steps instead.
+    AGREEMENT_STATES.includes(loan.state) && loan.state !== 'APPROVED' && { href: files.agreement(loan.id), label: 'Loan agreement' },
+    { href: files.schedule(loan.id), label: 'Repayment schedule' },
+    STATEMENT_STATES.includes(loan.state) && { href: files.statement(loan.id), label: 'Statement' },
+  ].filter(Boolean) as { href: string; label: string }[]
+  return (
+    <section className="ml-card flex flex-col gap-3" aria-label="Documents">
+      <h2 className="ml-h2">Print</h2>
+      <div className="flex flex-wrap gap-2">
+        {links.map((l) => <DownloadLink key={l.label} href={l.href} className="ml-btn ml-btn-sm no-underline">{l.label} (PDF)</DownloadLink>)}
+      </div>
+      {loan.state === 'PENDING' && <p className="m-0 text-[13px] text-ink-muted">The loan agreement can be printed once the loan is approved.</p>}
+      <FiledDocuments loan={loan} />
+      {loan.payments.length > 0 && (
+        <>
+          <h3 className="m-0 text-[13px] font-semibold text-ink-muted">Receipts</h3>
+          <ul className="m-0 p-0 list-none flex flex-col gap-1.5 text-[13px]">
+            {loan.payments.slice(0, 6).map((p, i) => (
+              <li key={p.id ?? i} className="flex justify-between gap-3">
+                <span>{formatDate(p.paid_on)} · {formatKina(p.amount)} · {p.method}</span>
+                {p.id != null && <DownloadLink href={files.receipt(loan.id, p.id)}>Receipt</DownloadLink>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
 function Decision({ loan }: { loan: LoanDetail }) {
-  const qc = useQueryClient()
-  const [amount, setAmount] = useState(suggestedAmount(loan))
-  const [note, setNote] = useState('')
-  const [confirmReject, setConfirmReject] = useState(false)
+  const { isApprover, me } = useMe()
+  const refresh = useLoanRefresh(loan.id)
   const [result, setResult] = useState<ActionResult | null>(null)
-  const done = (r: ActionResult) => {
-    setResult(r)
-    setConfirmReject(false)
-    qc.invalidateQueries({ queryKey: ['loan', loan.id] })
-    qc.invalidateQueries({ queryKey: ['loans'] })
-    qc.invalidateQueries({ queryKey: ['dashboard'] })
-  }
-  const approve = useMutation({ mutationFn: () => api.staff.approve(loan.id, parseKina(amount) ?? '', note), onSuccess: done })
-  const reject = useMutation({ mutationFn: () => api.staff.reject(loan.id, note), onSuccess: done })
-  const disburse = useMutation({ mutationFn: () => api.staff.disburse(loan.id), onSuccess: done })
+  const done = (r: ActionResult) => { setResult(r); refresh() }
+  const stage = loan.review?.stage ?? 'DRAFT'
+  const qc = useQueryClient()
   const reassess = useMutation({ mutationFn: () => api.staff.assess(loan.id), onSuccess: (d) => qc.setQueryData(['loan', loan.id], d) })
-  const error = approve.error ?? reject.error ?? disburse.error ?? reassess.error
-  const amountError = parseKina(amount) === null ? 'Enter an amount like 13,000.00' : undefined
+  const title = loan.state !== 'PENDING' ? 'Next step'
+    : stage === 'SUBMITTED' ? (isApprover ? 'Decision' : 'With the credit manager') : 'Your review'
 
   return (
     <section className="ml-card flex flex-col gap-4" aria-label="Decision">
-      <h2 className="ml-h2">{loan.state === 'PENDING' ? 'Decision' : 'Next step'}</h2>
+      <h2 className="ml-h2">{title}</h2>
       {result && <div role="status" className="ml-alert" style={{ background: 'var(--surface-sunken)', color: 'var(--ink)' }}>{result.message}</div>}
-      {error && <div className="ml-alert ml-alert-danger" role="alert">{(error as Error).message}</div>}
 
-      {loan.state === 'PENDING' && !confirmReject && (
-        <>
-          <Field label="Approved amount (PGK)" prefix="K" inputMode="decimal" value={amount}
-            onChange={(e) => setAmount(e.target.value)} error={amountError}
-            hint={loan.assessment ? `Policy capacity is ${formatKina(loan.assessment.max_recommended_principal)} for this client.` : undefined} />
-          <div className="ml-field">
-            <label className="ml-label" htmlFor="decision-note">Note for the file</label>
-            <textarea id="decision-note" className="ml-input" style={{ height: 88, padding: '10px 12px' }} value={note}
-              onChange={(e) => setNote(e.target.value)} placeholder="Why this decision, for the next person who reads the file" />
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <Button variant="primary" disabled={!!amountError || approve.isPending} onClick={() => approve.mutate()}>
-              Approve {parseKina(amount) ? formatKina(parseKina(amount)) : ''}
-            </Button>
-            <Button variant="danger" onClick={() => setConfirmReject(true)}>Reject</Button>
-            <Button variant="quiet" disabled={reassess.isPending} onClick={() => reassess.mutate()}>Run check again</Button>
-          </div>
-        </>
+      {loan.state === 'PENDING' && stage !== 'SUBMITTED' && <OfficerReview loan={loan} suggested={suggestedAmount(loan)} isApprover={isApprover} />}
+      {loan.state === 'PENDING' && stage === 'SUBMITTED' && (isApprover
+        ? <ManagerDecision loan={loan} suggested={suggestedAmount(loan)} onDone={done} username={me?.username} />
+        : <>
+            <OfficerSummary loan={loan} />
+            <p className="m-0 text-[13px] text-ink-muted">Waiting for a credit manager to approve, reject or send it back to you.</p>
+          </>)}
+      {loan.state === 'PENDING' && (
+        <Button variant="quiet" className="self-start" disabled={reassess.isPending} onClick={() => reassess.mutate()}>Run the affordability check again</Button>
       )}
 
-      {loan.state === 'PENDING' && confirmReject && (
-        <div className="flex flex-col gap-3 p-4 rounded-md bg-danger-soft">
-          <strong className="text-danger">Reject this application?</strong>
-          <span className="text-[13px] leading-[18px]">The borrower is told by SMS and the loan moves to Rejected. This can't be undone.</span>
-          {note.trim().length < 3 && <span className="text-[13px] font-medium text-danger">Add a note saying why before you reject.</span>}
-          <div className="flex flex-wrap gap-3">
-            <Button variant="danger" disabled={note.trim().length < 3 || reject.isPending} onClick={() => reject.mutate()}>Reject application</Button>
-            <Button variant="quiet" onClick={() => setConfirmReject(false)}>Keep reviewing</Button>
-          </div>
-        </div>
-      )}
-
-      {loan.state === 'APPROVED' && (
-        <>
-          <p className="m-0">Approved for {formatKina(loan.principal)}. Pay it out to the borrower, then record the disbursement.</p>
-          <Button variant="primary" className="self-start" disabled={disburse.isPending} onClick={() => disburse.mutate()}>Record disbursement</Button>
-        </>
-      )}
+      {loan.state === 'APPROVED' && <PayoutSteps loan={loan} onDone={done} canPayOut={isApprover} />}
 
       {['ACTIVE', 'ARREARS', 'ARREARS_LATE'].includes(loan.state) && (
         <>
@@ -173,7 +209,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
         </>
       )}
 
-      {loan.state === 'PENDING' && <p className="m-0 text-[13px] leading-[18px] text-ink-muted">If maker-checker is on in Fineract, a second credit manager confirms approvals and disbursements.</p>}
+      {loan.state === 'PENDING' && isApprover && <p className="m-0 text-[13px] leading-[18px] text-ink-muted">If maker-checker is on in Fineract, a second credit manager confirms approvals and disbursements.</p>}
     </section>
   )
 }

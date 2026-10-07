@@ -1,9 +1,15 @@
 FROM python:3.12-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
+# Tesseract reads the text on ID cards (English is enough for PNG NID cards and licences).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
-RUN pip install --upgrade pip && pip install "fastapi>=0.115" "uvicorn[standard]>=0.30" "pydantic>=2.8" \
-    "pydantic-settings>=2.4" "httpx>=0.27" "itsdangerous>=2.2" "tzdata>=2024.1"
+# Install exactly the dependencies listed in pyproject.toml (one list, so the image can't miss a package).
+RUN pip install --upgrade pip \
+ && python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/requirements.txt \
+ && pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
 COPY app ./app
 COPY policy.json ./policy.json
 RUN useradd --system --uid 10001 mclender

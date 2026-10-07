@@ -94,7 +94,7 @@ export function DataTable<R extends { id?: number | string }>({ columns, rows, c
   )
 }
 
-const STEPS = ['Submitted', 'Assessed', 'Approved', 'Disbursed', 'Repaying', 'Closed']
+const STEPS = ['Submitted', 'Assessed', 'Approved', 'Signed', 'Disbursed', 'Repaying', 'Closed']
 export function LoanStepper({ current, steps = STEPS }: { current: number; steps?: string[] }) {
   return (
     <ol className="ml-steps" aria-label="Loan progress">

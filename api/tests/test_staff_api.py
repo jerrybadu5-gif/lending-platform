@@ -67,7 +67,11 @@ def test_approve_disburse_flow(staff):
     r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00", "note": "Reduced to fit DTI"})
     assert r.status_code == 200 and r.json()["state"] == "APPROVED"
     assert staff.post("/api/staff/loans/536/approve", json={"amount": "13000.00"}).status_code == 409
-    r = staff.post("/api/staff/loans/536/disburse")
+    signed = staff.post(
+        "/api/staff/loans/536/signed-agreement", files={"file": ("signed.pdf", b"%PDF-1.4 signed", "x")}
+    )
+    assert signed.status_code == 201
+    r = staff.post("/api/staff/loans/536/disburse", json={"method": "bank", "reference": "BSP-TT-77120"})
     assert r.json()["state"] == "ACTIVE"
     d = staff.get("/api/staff/loans/536").json()
     assert d["principal"] == "13000.00" and d["state"] == "ACTIVE" and d["next_due_date"]
@@ -86,6 +90,8 @@ def test_loan_officer_cannot_approve(client):
 
 def test_reject_needs_note_and_sends_sms(staff, sms):
     assert staff.post("/api/staff/loans/542/reject", json={"note": ""}).status_code == 422
+    r = staff.post("/api/staff/loans/542/submit", json={"recommendation": "DECLINE", "note": "Can't afford it."})
+    assert r.status_code == 200
     r = staff.post("/api/staff/loans/542/reject", json={"note": "DTI too high"})
     assert r.json()["state"] == "REJECTED"
     assert sms.sent[-1][0] == "74220876"
@@ -113,6 +119,10 @@ def test_record_repayment_and_receipt_sms(staff, sms):
     )
     assert r.status_code == 201, r.text
     assert r.json()["receipt_no"].startswith("RC-")
+    filed = staff.get(f"/api/staff/loans/{mary['loan_id']}/documents").json()
+    assert [(d["kind"], d["file_name"]) for d in filed] == [("receipt", f"{r.json()['receipt_no']}.pdf")]
+    pdf = staff.get(f"/api/staff/loans/{mary['loan_id']}/documents/{filed[0]['id']}")
+    assert pdf.content.startswith(b"%PDF")
     assert "K 1,318.74" in sms.sent[-1][1]
     names = {c["borrower_name"] for c in staff.get("/api/staff/collections", params={"view": "today"}).json()}
     assert "Mary Kila" not in names
@@ -145,3 +155,77 @@ def test_login_rate_limited(client):
     for _ in range(10):
         client.post("/api/staff/login", json={"username": "x", "password": "y"})
     assert client.post("/api/staff/login", json={"username": "x", "password": "y"}).status_code == 429
+
+
+def officer(client):
+    r = client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    assert r.status_code == 200
+    return client
+
+
+def test_officer_reviews_then_manager_decides(client):
+    # 538 is still with the loan officer: the credit manager can't decide it yet.
+    officer(client)
+    loan = client.get("/api/staff/loans/538").json()
+    assert loan["review"]["stage"] == "DRAFT" and loan["review_stage"] == "DRAFT"
+    assert client.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == 403
+    assert (
+        client.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "short"}).status_code
+        == 422
+    )
+    r = client.post(
+        "/api/staff/loans/538/submit",
+        json={"recommendation": "APPROVE", "amount": "1000", "note": "Payslips match, employer confirmed."},
+    )
+    assert r.status_code == 200 and r.json()["review"]["stage"] == "SUBMITTED"
+    assert r.json()["review"]["officer_amount"] == "1000" and r.json()["review"]["submitted_by"] == "John Kerema"
+    assert any("recommends approving K 1,000.00" in h["text"] for h in r.json()["history"])
+    assert client.post("/api/staff/loans/538/return", json={"note": "Need a newer payslip"}).status_code == 403
+    again = client.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Sending again now."})
+    assert again.status_code == 409
+
+    client.post("/api/staff/logout")
+    client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+    pending = {l["id"]: l["review_stage"] for l in client.get("/api/staff/loans", params={"state": "PENDING"}).json()}
+    assert pending[538] == "SUBMITTED" and pending[542] == "DRAFT"
+    r = client.post("/api/staff/loans/538/return", json={"note": "Need a newer payslip"})
+    assert r.status_code == 200 and r.json()["review"]["stage"] == "RETURNED"
+    assert r.json()["review"]["returned_note"] == "Need a newer payslip"
+    r = client.post("/api/staff/loans/538/approve", json={"amount": "1000"})
+    assert r.status_code == 409 and "hasn't sent" in r.json()["detail"]
+
+
+def test_recommended_amount_cannot_exceed_application(staff):
+    r = staff.post(
+        "/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "amount": "5000", "note": "Checked it all."}
+    )
+    assert r.status_code == 422
+
+
+def test_review_gate_can_be_turned_off(staff):
+    staff.app.state.services.settings.review_required = False
+    assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).json()["state"] == "APPROVED"
+
+
+def test_manager_cannot_approve_what_they_sent_up(staff):
+    r = staff.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked it all myself."})
+    assert r.json()["review"]["submitted_user"] == "demo"
+    r = staff.post("/api/staff/loans/538/approve", json={"amount": "1200"})
+    assert r.status_code == 409 and "another credit manager" in r.json()["detail"]
+    staff.app.state.services.settings.allow_self_approval = True
+    assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).json()["state"] == "APPROVED"
+
+
+def test_review_not_set_up_says_so(staff):
+    backend = staff.app.state.services.backend
+    original = backend.get_loan
+
+    async def no_review(cred, loan_id, today):
+        d = await original(cred, loan_id, today)
+        return d.model_copy(update={"review": None})
+
+    backend.get_loan = no_review
+    r = staff.post("/api/staff/loans/533/approve", json={"amount": "8000"})
+    assert r.status_code == 503 and "dt_loan_review" in r.json()["detail"]
+    r = staff.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked it all myself."})
+    assert r.status_code == 503

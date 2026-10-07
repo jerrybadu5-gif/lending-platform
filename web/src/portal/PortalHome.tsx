@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, files } from '../api/client'
 import { Button, ErrorNote, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, weekdayDate } from '../lib/format'
 import { PortalShell } from './PortalShell'
+import { DownloadLink } from '../components/DownloadLink'
 
 export default function PortalHome() {
   const q = useQuery({ queryKey: ['portal', 'home'], queryFn: api.portal.home })
@@ -80,6 +81,12 @@ export default function PortalHome() {
               <p className="m-0 text-[13px] leading-[18px] text-ink-muted">You get an SMS receipt when we record your payment.</p>
             </section>
           )}
+
+          <section className="ml-card flex flex-col gap-2" style={{ padding: 16 }} aria-label="Your documents">
+            <h2 className="ml-h2">Your documents</h2>
+            <DownloadLink href={files.portalStatement} className="ml-btn justify-center no-underline">Download statement (PDF)</DownloadLink>
+            <DownloadLink href={files.portalSchedule} className="ml-btn ml-btn-quiet justify-center no-underline">Repayment schedule (PDF)</DownloadLink>
+          </section>
 
           <section className="ml-card flex flex-col gap-3" style={{ padding: 16 }}>
             <h2 className="ml-h2">Recent payments</h2>

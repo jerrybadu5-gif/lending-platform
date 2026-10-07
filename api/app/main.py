@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from .backends.base import BackendError, LendingBackend
 from .config import Settings, get_settings
 from .deps import Services
-from .routers import portal, staff
+from .routers import borrowers, documents, payout, portal, staff
 from .security import OtpStore, RateLimiter, SessionStore
 from .sms import make_sms
 from .underwriting import load_policy
@@ -34,11 +34,19 @@ def make_backend(settings: Settings, today) -> LendingBackend:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    if settings.backend == "fineract" and settings.session_secret == "dev-only-change-me":
-        raise RuntimeError("Set MCL_SESSION_SECRET before using the Fineract back end.")
+    weak = settings.session_secret.startswith(("dev-only", "change-me")) or len(settings.session_secret) < 32
+    if settings.backend == "fineract" and weak:
+        raise RuntimeError("Set MCL_SESSION_SECRET to a long random value (32+ characters) for the Fineract back end.")
     if settings.backend == "fineract" and not settings.cookie_secure:
         logging.getLogger("mclender").warning(
             "MCL_COOKIE_SECURE is off: sign-in cookies will also travel over plain HTTP. Turn it on behind HTTPS."
+        )
+    if settings.backend == "fineract" and settings.sms_provider == "console":
+        logging.getLogger("mclender").warning(
+            "No SMS provider: borrowers will not receive sign-in codes or receipts. %s",
+            "Codes are written to this log (MCL_SMS_LOG_CONTENT=true): local testing only."
+            if settings.sms_log_content
+            else "For local testing only, set MCL_SMS_LOG_CONTENT=true to read codes from this log.",
         )
 
     @asynccontextmanager
@@ -46,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         svc = Services(
             settings=settings,
             backend=None,  # type: ignore[arg-type]  # set just below, once today's date is known
-            sms=make_sms(settings.sms_provider, reveal=settings.backend == "demo"),
+            sms=make_sms(settings.sms_provider, reveal=settings.backend == "demo" or settings.sms_log_content),
             otp=OtpStore(settings.otp_ttl_seconds, settings.otp_max_attempts),
             policy=load_policy(settings.policy_file),
             login_limit=RateLimiter(10, 300),
@@ -105,6 +113,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"to": phone, "text": sent[-1][1] if sent else None}
 
     app.include_router(staff.router)
+    app.include_router(borrowers.router)
+    app.include_router(documents.router)
+    app.include_router(payout.router)
     app.include_router(portal.router)
     return app
 
