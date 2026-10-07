@@ -94,8 +94,9 @@ Tick each one. If something is wrong, note the screen, what you did and what you
       "Documents complete".
 - [ ] Back on his application, approve Peter for a smaller amount. The pay-out steps appear:
   - [ ] Step 1: "Loan agreement (PDF)" opens with the amount, his details and the DRAFT note.
-  - [ ] Step 2: shows "SMS sent to borrower". The SMS text is in the API log: `docker compose logs mclender-api | Select-String "approved"`.
-        "Log a phone call" with a note adds it to the list and to History.
+  - [ ] Step 2: shows "SMS not delivered (no SMS provider set up yet)" and is not ticked, because texts only
+        go to the log until Digicel/Vodafone is connected (`docker compose logs mclender-api | Select-String "approved"`).
+        "Log a phone call" with a note ticks step 2 and adds the call to History.
   - [ ] Step 4 says to upload the signed agreement first; there is no pay-out button yet.
   - [ ] Step 3: upload any PDF as the signed agreement. It shows as a link; Signed is ticked on the progress bar.
   - [ ] Step 4: the account number is filled in from his profile. Enter a reference and record the disbursement.

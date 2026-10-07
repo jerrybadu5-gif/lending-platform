@@ -79,3 +79,81 @@ def test_signed_agreement_rule_can_be_turned_off(staff):
 def test_loan_officer_cannot_pay_out(client):
     client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
     assert client.post("/api/staff/loans/536/disburse", json={"reference": "X1"}).status_code == 403
+
+
+def test_no_sms_while_approval_waits_for_second_approver(staff, sms, monkeypatch):
+    from app.domain.models import ActionResult
+
+    async def pending(cred, loan_id, body, today):
+        return ActionResult(
+            loan_id=loan_id, state="PENDING", message="Approval saved. A second approver must confirm it."
+        )
+
+    monkeypatch.setattr(staff.app.state.services.backend, "approve", pending)
+    before = len(sms.sent)
+    r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000"})
+    assert r.json()["state"] == "PENDING" and len(sms.sent) == before
+
+
+def test_pending_payout_is_not_announced_or_repeated(staff, sms, monkeypatch):
+    from app.domain.models import ActionResult
+
+    approve_peter(staff)
+    staff.post("/api/staff/loans/536/signed-agreement", files=SIGNED)
+
+    async def pending(cred, loan_id, body, today):
+        return ActionResult(
+            loan_id=loan_id, state="APPROVED", message="Disbursement saved. A second approver must confirm it."
+        )
+
+    monkeypatch.setattr(staff.app.state.services.backend, "disburse", pending)
+    before = len(sms.sent)
+    r = staff.post("/api/staff/loans/536/disburse", json={"reference": "TT-5"})
+    assert r.json()["state"] == "APPROVED" and len(sms.sent) == before  # no "paid out" SMS yet
+    p = staff.get("/api/staff/loans/536/payout").json()
+    assert p["payout_pending"] is True and p["ready"] is False
+    again = staff.post("/api/staff/loans/536/disburse", json={"reference": "TT-5"})
+    assert again.status_code == 409 and "second approver" in again.json()["detail"]
+
+
+def test_sms_that_went_is_not_reported_as_failed_when_the_note_fails(staff, sms, monkeypatch):
+    async def broken(*a, **k):
+        raise RuntimeError("Fineract 500")
+
+    monkeypatch.setattr(staff.app.state.services.backend, "add_loan_note", broken)
+    r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000"})
+    assert r.status_code == 200 and "didn't go" not in r.json()["message"] and "LN-000536" in sms.sent[-1][1]
+    up = staff.post("/api/staff/loans/536/signed-agreement", files=SIGNED)
+    assert up.status_code == 201  # stored, so not reported as failed (a retry would upload it twice)
+
+
+def test_resend_is_limited(staff):
+    approve_peter(staff)
+    assert staff.post("/api/staff/loans/536/contact", json={"channel": "sms"}).status_code == 201
+    assert staff.post("/api/staff/loans/536/contact", json={"channel": "sms"}).status_code == 201
+    r = staff.post("/api/staff/loans/536/contact", json={"channel": "sms"})
+    assert r.status_code == 429 and "10 minutes" in r.json()["detail"]
+
+
+def test_without_sms_provider_staff_are_told_to_phone(staff, sms):
+    staff.app.state.services.settings.backend = "fineract"  # sample data, but act as if live without a provider
+    r = staff.post("/api/staff/loans/536/approve", json={"amount": "13000"})
+    assert "phone the borrower" in r.json()["message"]
+    p = staff.get("/api/staff/loans/536/payout").json()
+    assert p["sms_delivers"] is False and p["told_done"] is False
+    assert p["borrower_told"][0]["text"].startswith("SMS not delivered")
+    staff.post("/api/staff/loans/536/contact", json={"channel": "phone", "note": "Coming Monday"})
+    assert staff.get("/api/staff/loans/536/payout").json()["told_done"] is True
+
+
+def test_loan_officer_can_log_contact_and_upload_signed_copy(client, staff):
+    approve_peter(staff)
+    staff.post("/api/staff/logout")
+    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    assert client.post("/api/staff/loans/536/contact", json={"channel": "phone", "note": "ok"}).status_code == 201
+    assert client.post("/api/staff/loans/536/signed-agreement", files=SIGNED).status_code == 201
+
+
+def test_signed_agreement_cannot_be_filed_on_the_borrower(staff):
+    r = staff.post("/api/staff/borrowers/8/documents", data={"kind": "signed_agreement"}, files=SIGNED)
+    assert r.status_code == 422

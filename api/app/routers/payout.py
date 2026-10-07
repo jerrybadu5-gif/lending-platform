@@ -7,9 +7,15 @@ Steps on an approved loan:
   3. Upload the signed agreement to the loan.
   4. Record the disbursement (method, reference, account), which needs step 3 when
      MCL_SIGNED_AGREEMENT_REQUIRED is on.
+
+Loan officers may do steps 2 and 3 (they deal with borrowers day to day); pay-out needs a credit manager.
+A side effect that has happened (SMS sent, file stored) is never reported as failed because the
+note recording it couldn't be saved; that would invite a second SMS or a duplicate upload.
 """
 
 from __future__ import annotations
+
+import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -20,9 +26,17 @@ from ..domain.uploads import UploadRejected, check_upload, content_disposition
 from ..security import StaffSession, staff_session
 
 router = APIRouter(prefix="/api/staff/loans", tags=["payout"])
+log = logging.getLogger("mclender.payout")
 
 SMS_MARK = "SMS sent to borrower"
+SMS_LOGGED_MARK = "SMS not delivered (no SMS provider set up yet)"
 PHONE_MARK = "Phoned borrower"
+PAYOUT_PENDING_MARK = "Pay-out recorded, waiting for a second approver"
+
+
+def sms_delivers(svc: Services) -> bool:
+    """Sample data treats the log as the phone; with Fineract, only a real SMS provider delivers."""
+    return svc.settings.backend == "demo" or svc.settings.sms_provider != "console"
 
 
 def sign_sms(svc: Services, loan: LoanDetail) -> str:
@@ -32,30 +46,62 @@ def sign_sms(svc: Services, loan: LoanDetail) -> str:
     )
 
 
-async def notify_approved(svc: Services, cred: str, loan_id: int) -> None:
-    """Tell the borrower to come and sign, and note it on the loan. Never fails the approval."""
+async def add_note_safely(svc: Services, cred: str, loan_id: int, text: str) -> bool:
+    try:
+        await svc.backend.add_loan_note(cred, loan_id, text, svc.today())
+        return True
+    except Exception:
+        log.exception("Could not save the note on loan %s: %s", loan_id, text)
+        return False
+
+
+async def _send_sign_sms(svc: Services, cred: str, loan: LoanDetail) -> str:
+    """Send the 'come and sign' SMS (raises if sending fails) and note it. Returns the note text."""
+    phone = loan.borrower.phone
+    await svc.sms.send(phone or "", sign_sms(svc, loan))
+    text = (
+        f"{SMS_MARK} ({phone}): agreement ready to sign"
+        if sms_delivers(svc)
+        else f"{SMS_LOGGED_MARK}: phone the borrower on {phone}"
+    )
+    await add_note_safely(svc, cred, loan.id, text)
+    return text
+
+
+async def notify_approved(svc: Services, cred: str, loan_id: int) -> str | None:
+    """Tell the borrower to come and sign. Returns a warning for staff if the SMS couldn't be sent."""
     loan = await svc.backend.get_loan(cred, loan_id, svc.today())
     if not loan.borrower.phone:
-        await svc.backend.add_loan_note(cred, loan_id, "No phone on file: contact the borrower to sign", svc.today())
-        return
-    await svc.sms.send(loan.borrower.phone, sign_sms(svc, loan))
-    await svc.backend.add_loan_note(
-        cred, loan_id, f"{SMS_MARK} ({loan.borrower.phone}): agreement ready to sign", svc.today()
-    )
+        await add_note_safely(svc, cred, loan_id, "No phone on file: contact the borrower to sign")
+        return " There is no phone number on file: contact the borrower to sign."
+    try:
+        await _send_sign_sms(svc, cred, loan)
+    except Exception:
+        log.exception("Could not send the approval SMS for loan %s", loan_id)
+        return " The SMS to the borrower didn't go: send it again from the loan."
+    if not sms_delivers(svc):
+        return " No SMS provider is set up yet, so phone the borrower to come and sign."
+    return None
 
 
-async def payout_status(svc: Services, cred: str, loan_id: int) -> PayoutStatus:
-    loan = await svc.backend.get_loan(cred, loan_id, svc.today())
+async def payout_status(svc: Services, cred: str, loan_id: int, loan: LoanDetail | None = None) -> PayoutStatus:
+    loan = loan or await svc.backend.get_loan(cred, loan_id, svc.today())
     docs = await svc.backend.list_loan_documents(cred, loan_id)
     signed = next((d for d in docs if d.kind == "signed_agreement"), None)
     # loan.history is newest first; the contact log reads oldest first.
-    told = [e for e in reversed(loan.history) if e.text.startswith((SMS_MARK, PHONE_MARK))]
+    told = [e for e in reversed(loan.history) if e.text.startswith((SMS_MARK, SMS_LOGGED_MARK, PHONE_MARK))]
+    pending = any(e.text.startswith(PAYOUT_PENDING_MARK) for e in loan.history)
     missing = []
     if svc.settings.signed_agreement_required and signed is None:
         missing.append("Upload the borrower's signed loan agreement.")
+    if pending:
+        missing.append("A pay-out is already waiting for a second approver in Fineract.")
     return PayoutStatus(
         loan_id=loan_id,
         borrower_told=told,
+        told_done=any(e.text.startswith((SMS_MARK, PHONE_MARK)) for e in told),
+        sms_delivers=sms_delivers(svc),
+        payout_pending=pending,
         signed_agreement=signed,
         bank=loan.borrower.bank,
         phone=loan.borrower.phone,
@@ -78,15 +124,19 @@ async def contact(
         raise HTTPException(
             409, "The borrower is told to come and sign only while the loan is approved and not yet paid out."
         )
-    note = body.note.strip()
     if body.channel == "sms":
         if not loan.borrower.phone:
             raise HTTPException(422, "There is no phone number for this borrower. Add one on their profile.")
-        await svc.sms.send(loan.borrower.phone, sign_sms(svc, loan))
-        text = f"{SMS_MARK} ({loan.borrower.phone}): agreement ready to sign"
+        try:
+            svc.resend_limit.check(f"sign-sms:{loan_id}")
+        except HTTPException:
+            raise HTTPException(429, "An SMS was just sent. Wait 10 minutes before sending another.") from None
+        text = await _send_sign_sms(svc, s.cred, loan)
     else:
-        text = f"{PHONE_MARK}" + (f": {note}" if note else "")
-    await svc.backend.add_loan_note(s.cred, loan_id, text, svc.today())
+        note = body.note.strip()
+        text = PHONE_MARK + (f": {note}" if note else "")
+        if not await add_note_safely(svc, s.cred, loan_id, text):
+            raise HTTPException(502, "The call couldn't be saved in Fineract. Try again in a moment.")
     return LoanEvent(when=svc.today().isoformat(), text=text, who=s.display_name)
 
 
@@ -107,7 +157,7 @@ async def upload_signed(
     except UploadRejected as e:
         raise HTTPException(422, str(e)) from e
     doc = await svc.backend.add_loan_document(s.cred, loan_id, "signed_agreement", name, ctype, data, svc.today())
-    await svc.backend.add_loan_note(s.cred, loan_id, f"Signed agreement uploaded ({name})", svc.today())
+    await add_note_safely(svc, s.cred, loan_id, f"Signed agreement uploaded ({name})")
     return doc
 
 

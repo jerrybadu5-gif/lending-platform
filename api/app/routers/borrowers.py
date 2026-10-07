@@ -79,7 +79,7 @@ async def upload(
     s: StaffSession = Depends(staff_session),
     svc: Services = Depends(services),
 ):
-    if kind not in DOCUMENT_LABELS:
+    if kind not in DOCUMENT_LABELS or kind == "signed_agreement":  # signed agreements belong to the loan
         raise HTTPException(422, "Choose what kind of document this is.")
     limit = svc.settings.max_upload_mb * 1024 * 1024
     data = await file.read(limit + 1)

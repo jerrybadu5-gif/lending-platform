@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -25,6 +25,8 @@ class Services:
     login_limit: RateLimiter
     otp_limit: RateLimiter
     sessions: SessionStore
+    # At most 2 'come and sign' SMS resends per loan in 10 minutes (cost, and not to pester borrowers).
+    resend_limit: RateLimiter = field(default_factory=lambda: RateLimiter(2, 600))
 
     def today(self) -> date:
         return datetime.now(local_zone(self.settings.timezone)).date()

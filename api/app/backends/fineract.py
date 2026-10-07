@@ -21,7 +21,7 @@ import hashlib
 import logging
 import re
 import time
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import Any, cast
 from urllib.parse import quote
@@ -29,6 +29,7 @@ from urllib.parse import quote
 import httpx
 
 from ..config import Settings
+from ..deps import local_zone as _local_zone
 from ..domain.models import (
     DOCUMENT_LABELS,
     ActionResult,
@@ -139,6 +140,7 @@ class FineractBackend:
         self._payment_types: dict[str, int] | None = None
         self._cache: dict[str, tuple[float, Any]] = {}
         self._sem = asyncio.Semaphore(8)
+        self._zone = _local_zone(settings.timezone)
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -343,8 +345,15 @@ class FineractBackend:
             (tl.get("actualDisbursementDate"), "Disbursed", tl.get("disbursedByUsername")),
             (tl.get("closedOnDate"), "Closed", tl.get("closedByUsername")),
         ]
-        history = [LoanEvent(when=fdate(d).isoformat(), text=t, who=w) for d, t, w in events if fdate(d)]  # type: ignore[union-attr]
-        history = sorted(history + notes, key=lambda e: e.when)  # stable: same-day events keep their order
+        # Fineract's timeline has dates only. Within a day: submitted and approved come before that day's notes
+        # (contact, signed copy), which come before a disbursement, rejection or closing.
+        rank = {"Application submitted": 0, "Approved": 1, "Rejected": 3, "Disbursed": 3, "Closed": 4}
+        keyed = [
+            ((fdate(d).isoformat(), rank[t], ""), LoanEvent(when=fdate(d).isoformat(), text=t, who=w))  # type: ignore[union-attr]
+            for d, t, w in events
+            if fdate(d)
+        ] + [((e.when, 2, order), e) for order, e in notes]
+        history = [e for _, e in sorted(keyed, key=lambda pair: pair[0])]
         payments = [
             Payment(
                 id=int(t["id"]) if t.get("id") is not None else None,
@@ -448,19 +457,25 @@ class FineractBackend:
             )
         return ActionResult(loan_id=loan_id, state="ACTIVE", message="Loan disbursed.")
 
-    async def _loan_notes(self, cred: str, loan_id: int) -> list[LoanEvent]:
-        """Loan notes (contact log, signed agreement, purpose) for the loan's history."""
+    async def _loan_notes(self, cred: str, loan_id: int) -> list[tuple[str, LoanEvent]]:
+        """Loan notes (contact log, signed agreement, purpose) for the loan's history, each with a sort key
+        (full timestamp, then id). Never blocks loading a loan: notes are extra information."""
+        if cred == "portal":  # borrowers don't see the loan history, and the portal user can't read notes
+            return []
         try:
             raws = await self._get(cred, f"/loans/{loan_id}/notes")
         except BackendError as e:
-            if e.status in (403, 404):  # the portal user can't read notes; borrowers don't see them
-                return []
-            raise
+            log.warning("Could not read notes for loan %s: %s", loan_id, e.message)
+            return []
         out = []
         for n in raws or []:
-            when = _note_date(n.get("createdOn"))
-            if when and n.get("note"):
-                out.append(LoanEvent(when=when.isoformat(), text=n["note"], who=n.get("createdByUsername")))
+            text = (n.get("note") or "").strip()
+            when = _note_time(n.get("createdOn"), self._zone)
+            # Skip notes McLender writes on transactions; the transactions show in history already.
+            if not text or when is None or text.startswith(("Recorded in McLender", "Paid out in McLender")):
+                continue
+            order = f"{when.isoformat()}#{int(n.get('id') or 0):012d}"
+            out.append((order, LoanEvent(when=when.date().isoformat(), text=text, who=n.get("createdByUsername"))))
         return out
 
     async def add_loan_note(self, cred: str, loan_id: int, text: str, today: date) -> None:
@@ -967,11 +982,26 @@ class FineractBackend:
         return summary
 
 
-def _note_date(v: Any) -> date | None:
-    """Note dates come as [y, m, d, ...], an ISO string, or epoch milliseconds, depending on version."""
-    if isinstance(v, int | float):
-        return date.fromtimestamp(v / 1000)
-    return fdate(v)
+def _note_time(v: Any, zone: tzinfo) -> datetime | None:
+    """A note's creation time in local (Port Moresby) time. Fineract stores it in UTC and sends it as
+    epoch milliseconds, an ISO date-time, or [y, m, d, h, min, s], depending on version. A date alone
+    is taken as that local day."""
+    try:
+        if isinstance(v, int | float):
+            return datetime.fromtimestamp(v / 1000, tz=UTC).astimezone(zone)
+        if isinstance(v, list | tuple) and len(v) >= 3:
+            if len(v) < 4:
+                return datetime(int(v[0]), int(v[1]), int(v[2]), 12, tzinfo=zone)
+            y, mo, d, h, mi, sec = ([int(x) for x in v[:6]] + [0, 0, 0])[:6]
+            return datetime(y, mo, d, h, mi, sec, tzinfo=UTC).astimezone(zone)
+        if isinstance(v, str) and v:
+            if len(v) <= 10:
+                return datetime.fromisoformat(v).replace(hour=12, tzinfo=zone)
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).astimezone(zone)
+    except (ValueError, TypeError):
+        return None
+    return None
 
 
 def _nid_key(nid: str) -> str:

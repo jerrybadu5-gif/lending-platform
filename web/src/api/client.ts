@@ -40,7 +40,8 @@ export interface BorrowerDocument {
 export interface KycStatus { complete: boolean; missing: string[]; have: Partial<Record<DocumentKind, number>> }
 export interface LoanEvent { when: string; text: string; who: string | null }
 export interface PayoutStatus {
-  loan_id: number; borrower_told: LoanEvent[]; signed_agreement: BorrowerDocument | null; bank: BankAccount | null
+  loan_id: number; borrower_told: LoanEvent[]; told_done: boolean; sms_delivers: boolean; payout_pending: boolean
+  signed_agreement: BorrowerDocument | null; bank: BankAccount | null
   phone: string | null; ready: boolean; missing: string[]
 }
 export type PayoutMethod = 'bank' | 'mobile' | 'cash'

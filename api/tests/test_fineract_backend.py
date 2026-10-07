@@ -454,3 +454,63 @@ def test_loan_notes_and_signed_agreement(fb):
 def test_portal_cannot_read_notes_is_fine(fb):
     respx.get(f"{BASE}/loans/536/notes").respond(403, json={"defaultUserMessage": "no"})
     assert run(fb._loan_notes("portal", 536)) == []
+
+
+def test_note_times_are_port_moresby_days():
+    from app.backends.fineract import _note_time
+    from app.deps import local_zone
+
+    pom = local_zone("Pacific/Port_Moresby")
+    # 23:30 UTC on the 5th is 09:30 on the 6th in Port Moresby
+    assert _note_time("2026-10-05T23:30:00Z", pom).date() == date(2026, 10, 6)
+    assert _note_time([2026, 10, 5, 23, 30, 0], pom).date() == date(2026, 10, 6)
+    epoch = 1791243000000  # 2026-10-05 23:30 UTC
+    assert _note_time(epoch, pom).date() == date(2026, 10, 6)
+    assert _note_time("2026-10-05", pom).date() == date(2026, 10, 5)
+    assert _note_time("rubbish", pom) is None
+
+
+@respx.mock
+def test_history_orders_same_day_events_sensibly(fb):
+    loan = {
+        **LOAN,
+        "status": {"id": 300},
+        "timeline": {
+            "submittedOnDate": [2026, 10, 6],
+            "approvedOnDate": [2026, 10, 6],
+            "actualDisbursementDate": [2026, 10, 6],
+        },
+    }
+    respx.get(f"{BASE}/loans/536").respond(200, json=loan)
+    respx.get(f"{BASE}/clients/8").respond(200, json={"id": 8, "displayName": "Peter Wambi"})
+    respx.get(f"{BASE}/clients/8/identifiers").respond(200, json=[])
+    respx.get(url__regex=rf"{BASE}/datatables/.*").respond(200, json=[])
+    respx.get(f"{BASE}/loans/536/notes").respond(
+        200,
+        json=[  # Fineract lists newest first
+            {"id": 3, "note": "Signed agreement uploaded (s.pdf)", "createdOn": "2026-10-06T01:00:00Z"},
+            {"id": 4, "note": "Paid out in McLender (bank), reference TT-1", "createdOn": "2026-10-06T02:00:00Z"},
+            {"id": 2, "note": "Phoned borrower: coming at 11", "createdOn": "2026-10-05T23:10:00Z"},
+            {
+                "id": 1,
+                "note": "SMS sent to borrower (71234567): agreement ready to sign",
+                "createdOn": "2026-10-05T23:00:00Z",
+            },
+        ],
+    )
+    d = run(fb.get_loan("K", 536, TODAY))
+    oldest_first = [h.text for h in reversed(d.history)]
+    assert oldest_first == [
+        "Application submitted",
+        "Approved",
+        "SMS sent to borrower (71234567): agreement ready to sign",
+        "Phoned borrower: coming at 11",
+        "Signed agreement uploaded (s.pdf)",
+        "Disbursed",
+    ]
+
+
+@respx.mock
+def test_notes_failure_never_blocks_loading_a_loan(fb):
+    respx.get(f"{BASE}/loans/536/notes").respond(500, text="boom")
+    assert run(fb._loan_notes("K", 536)) == []

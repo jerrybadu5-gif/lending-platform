@@ -29,7 +29,7 @@ export function PayoutSteps({ loan, onDone }: { loan: LoanDetail; onDone: (r: Ac
   if (q.error) return <ErrorNote error={q.error} retry={() => q.refetch()} />
   if (!q.data) return <Skeleton h={240} />
   const p = q.data
-  const told = p.borrower_told.length > 0
+  const told = p.told_done
   const signed = !!p.signed_agreement
 
   return (
@@ -44,8 +44,9 @@ export function PayoutSteps({ loan, onDone }: { loan: LoanDetail; onDone: (r: Ac
           ? <ul className="m-0 pl-[18px] text-[13px] flex flex-col gap-1">
               {p.borrower_told.map((e, i) => <li key={i}>{formatDate(e.when)} · {e.text}{e.who && <span className="text-ink-muted"> · {e.who}</span>}</li>)}
             </ul>
-          : <p className="m-0 text-[13px] text-ink-muted">No contact recorded yet.</p>}
-        <Contact loan={loan} phone={p.phone} onSaved={refresh} />
+          : <p className="m-0 text-[13px] text-ink-muted">No contact recorded yet. If the loan was approved by a second approver or in Mifos X, no SMS has gone: send it now.</p>}
+        {!p.sms_delivers && <p className="m-0 text-[13px] text-warning">No SMS provider is set up yet, so texts don't reach the borrower. Phone them and log the call.</p>}
+        <Contact loan={loan} phone={p.phone} smsDelivers={p.sms_delivers} onSaved={refresh} />
       </Step>
 
       <Step n={3} done={signed} title="Upload the signed agreement">
@@ -57,7 +58,7 @@ export function PayoutSteps({ loan, onDone }: { loan: LoanDetail; onDone: (r: Ac
 
       <Step n={4} done={false} title="Pay out and record it" last>
         {p.ready
-          ? <PayOut loan={loan} account={p.bank?.account_number ?? ''} bank={p.bank ? `${p.bank.bank}${p.bank.branch ? `, ${p.bank.branch}` : ''} · ${p.bank.account_name}` : null} onDone={onDone} />
+          ? <PayOut loan={loan} account={p.bank?.account_number ?? ''} phone={p.phone ?? ''} bank={p.bank ? `${p.bank.bank}${p.bank.branch ? `, ${p.bank.branch}` : ''} · ${p.bank.account_name}` : null} onDone={onDone} />
           : <p className="m-0 text-[13px] text-ink-muted">{p.missing.join(' ') || 'Not ready yet.'}</p>}
       </Step>
     </ol>
@@ -76,7 +77,7 @@ function Step({ n, title, done, last, children }: { n: number; title: string; do
   )
 }
 
-function Contact({ loan, phone, onSaved }: { loan: LoanDetail; phone: string | null; onSaved: () => void }) {
+function Contact({ loan, phone, smsDelivers, onSaved }: { loan: LoanDetail; phone: string | null; smsDelivers: boolean; onSaved: () => void }) {
   const [note, setNote] = useState('')
   const [calling, setCalling] = useState(false)
   const sms = useMutation({ mutationFn: () => api.staff.contact(loan.id, 'sms'), onSuccess: onSaved })
@@ -89,8 +90,8 @@ function Contact({ loan, phone, onSaved }: { loan: LoanDetail; phone: string | n
     <div className="flex flex-col gap-2">
       {!calling && (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={!phone || sms.isPending} onClick={() => sms.mutate()}>{sms.isPending ? 'Sending…' : 'Send SMS again'}</Button>
-          <Button size="sm" variant="quiet" onClick={() => setCalling(true)}>Log a phone call</Button>
+          <Button size="sm" variant={smsDelivers ? 'secondary' : 'quiet'} disabled={!phone || sms.isPending} onClick={() => sms.mutate()}>{sms.isPending ? 'Sending…' : 'Send SMS again'}</Button>
+          <Button size="sm" variant={smsDelivers ? 'quiet' : 'secondary'} onClick={() => setCalling(true)}>Log a phone call</Button>
         </div>
       )}
       {calling && (
@@ -123,9 +124,15 @@ function UploadSigned({ loanId, again, onSaved }: { loanId: number; again: boole
   )
 }
 
-function PayOut({ loan, account, bank, onDone }: { loan: LoanDetail; account: string; bank: string | null; onDone: (r: ActionResult) => void }) {
+function PayOut({ loan, account, phone, bank, onDone }:
+  { loan: LoanDetail; account: string; phone: string; bank: string | null; onDone: (r: ActionResult) => void }) {
   const [method, setMethod] = useState<PayoutMethod>('bank')
   const [to, setTo] = useState(account)
+  // Each method fills in its own destination, so a bank account number is never recorded as a wallet.
+  const choose = (next: PayoutMethod) => {
+    setMethod(next)
+    setTo(next === 'bank' ? account : next === 'mobile' ? phone : '')
+  }
   const [reference, setReference] = useState('')
   const [touched, setTouched] = useState(false)
   const m = METHODS.find((x) => x.id === method)!
@@ -144,7 +151,7 @@ function PayOut({ loan, account, bank, onDone }: { loan: LoanDetail; account: st
     <form className="flex flex-col gap-3" onSubmit={submit} noValidate aria-label="Record disbursement">
       <p className="m-0 text-[13px]">Pay <strong>{formatKina(loan.principal)}</strong> to {loan.borrower.name}, then record it here.</p>
       <div className="grid grid-cols-3 gap-2" role="group" aria-label="Paid by">
-        {METHODS.map((x) => <button type="button" key={x.id} className="ml-chip" aria-pressed={x.id === method} onClick={() => setMethod(x.id)}>{x.label}</button>)}
+        {METHODS.map((x) => <button type="button" key={x.id} className="ml-chip" aria-pressed={x.id === method} onClick={() => choose(x.id)}>{x.label}</button>)}
       </div>
       {method !== 'cash' && (
         <Field label={method === 'bank' ? 'Paid into account number' : 'Mobile money number'} value={to} onChange={(e) => setTo(e.target.value)}

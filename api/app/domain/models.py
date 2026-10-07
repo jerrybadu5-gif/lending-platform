@@ -219,6 +219,9 @@ class PayoutStatus(BaseModel):
 
     loan_id: int
     borrower_told: list[LoanEvent] = []
+    told_done: bool = False  # a delivered SMS or a logged phone call
+    sms_delivers: bool = True  # False while there is no SMS provider (messages only go to the log)
+    payout_pending: bool = False  # a pay-out was recorded and waits for a second approver in Fineract
     signed_agreement: BorrowerDocument | None = None
     bank: BankAccount | None = None
     phone: str | None = None
