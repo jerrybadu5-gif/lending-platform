@@ -8,7 +8,7 @@ export type Recommendation = 'APPROVE' | 'REFER' | 'DECLINE'
 export type PaymentMethod = 'cash' | 'bank' | 'mobile' | 'payroll'
 
 export type Gender = 'female' | 'male'
-export type DocumentKind = 'id' | 'payslip' | 'bank_statement' | 'deduction_authority' | 'other' | 'signed_agreement'
+export type DocumentKind = 'id' | 'payslip' | 'bank_statement' | 'deduction_authority' | 'other' | 'signed_agreement' | 'receipt'
 export const DOCUMENT_LABELS: Record<DocumentKind, string> = {
   id: "ID (NID card, passport or driver's licence)",
   payslip: 'Latest 3 payslips',
@@ -16,6 +16,7 @@ export const DOCUMENT_LABELS: Record<DocumentKind, string> = {
   deduction_authority: 'Payroll deduction authority (signed)',
   other: 'Other document',
   signed_agreement: 'Signed loan agreement',
+  receipt: 'Payment receipt',
 }
 
 export interface StaffUser { username: string; display_name: string; roles: string[] }
@@ -25,6 +26,7 @@ export interface Borrower {
   id: number; name: string; phone: string | null; national_id: string | null; employer: string | null
   address: string | null; monthly_income: Money | null; existing_monthly_debt: Money | null
   credit_score: number | null; monthly_business_noi: Money | null; income_verified: boolean | null
+  has_photo?: boolean
   date_of_birth: string | null; gender: Gender | null; payroll_number: string | null
   bank: BankAccount | null; next_of_kin: NextOfKin | null
 }
@@ -45,7 +47,10 @@ export interface PayoutStatus {
   phone: string | null; ready: boolean; missing: string[]
 }
 export type PayoutMethod = 'bank' | 'mobile' | 'cash'
-export interface BorrowerProfile { borrower: Borrower; documents: BorrowerDocument[]; kyc: KycStatus; loans: LoanSummary[] }
+export interface BorrowerProfile {
+  borrower: Borrower; documents: BorrowerDocument[]; kyc: KycStatus; loans: LoanSummary[]
+  notes: LoanEvent[]; has_photo: boolean
+}
 export interface Installment {
   number: number; due_date: string; principal: Money; interest: Money; fees: Money; total: Money; paid: Money
   balance_after: Money; complete: boolean
@@ -59,12 +64,26 @@ export interface LoanSummary {
   annual_rate: Money; term_months: number; state: LoanState; days_overdue: number; outstanding: Money
   overdue_amount: Money; next_due_date: string | null; next_due_amount: Money | null; submitted_on: string | null
   recommendation: Recommendation | null
+  review_stage?: ReviewStage | null
+}
+export type ReviewStage = 'DRAFT' | 'SUBMITTED' | 'RETURNED'
+export type OfficerAdvice = 'APPROVE' | 'DECLINE'
+export interface LoanReview {
+  stage: ReviewStage; officer_recommendation: OfficerAdvice | null; officer_amount: Money | null; officer_note: string | null
+  submitted_by: string | null; submitted_user?: string | null; submitted_on: string | null
+  returned_note: string | null; returned_by: string | null; returned_on: string | null
+}
+export interface IdScan {
+  photo: string | null
+  suggestions: { national_id: string | null; first_name: string | null; last_name: string | null; date_of_birth: string | null; gender: Gender | null }
+  text_read: boolean; problems: string[]
 }
 export interface Payment { id: number | null; paid_on: string; amount: Money; method: string; reference: string | null }
 export interface LoanDetail extends LoanSummary {
   interest_method: 'DECLINING_BALANCE' | 'FLAT'; borrower: Borrower; schedule: Installment[]; total_interest: Money
   assessment: Assessment | null; history: { when: string; text: string; who: string | null }[]; payments: Payment[]
-  payment_reference: string
+  payment_reference: string; approved_on?: string | null
+  review?: LoanReview | null
 }
 export interface Dashboard {
   as_of: string; gross_portfolio: Money; active_loans: number; disbursed_this_month: number; par30_ratio: Money
@@ -79,6 +98,7 @@ export interface ActionResult { loan_id: number; state: LoanState; message: stri
 export interface Receipt {
   receipt_no: string; loan_id: number; ref: string; borrower_name: string; amount: Money; method: PaymentMethod
   reference: string; received_on: string; sms_sent_to: string | null; payment_id: number | null
+  filed?: boolean
 }
 export interface PortalLoan {
   ref: string; borrowed: Money; left_to_pay: Money; payments_made: number; payments_total: number
@@ -143,6 +163,9 @@ export const api = {
     assess: (id: number) => request<LoanDetail>('POST', `/api/staff/loans/${id}/assess`),
     approve: (id: number, amount: string, note: string) =>
       request<ActionResult>('POST', `/api/staff/loans/${id}/approve`, { amount, note }),
+    submit: (id: number, body: { recommendation: OfficerAdvice; amount: string | null; note: string }) =>
+      request<LoanDetail>('POST', `/api/staff/loans/${id}/submit`, body),
+    sendBack: (id: number, note: string) => request<LoanDetail>('POST', `/api/staff/loans/${id}/return`, { note }),
     reject: (id: number, note: string) => request<ActionResult>('POST', `/api/staff/loans/${id}/reject`, { note }),
     disburse: (id: number, body: { method: PayoutMethod; reference: string; account: string | null }) =>
       request<ActionResult>('POST', `/api/staff/loans/${id}/disburse`, body),
@@ -154,6 +177,9 @@ export const api = {
       form.append('file', file)
       return request<BorrowerDocument>('POST', `/api/staff/loans/${id}/signed-agreement`, form)
     },
+    loanDocuments: (id: number) => request<BorrowerDocument[]>('GET', `/api/staff/loans/${id}/documents`),
+    removeLoanDocument: (id: number, docId: number, reason: string) =>
+      request<void>('POST', `/api/staff/loans/${id}/documents/${docId}/remove`, { reason }),
     collections: (view: 'today' | 'arrears' | 'all') =>
       request<CollectionItem[]>('GET', `/api/staff/collections?view=${view}`),
     repay: (id: number, body: { amount: string; method: PaymentMethod; reference: string; received_on: string }) =>
@@ -168,6 +194,14 @@ export const api = {
       form.append('kind', kind)
       form.append('file', file)
       return request<BorrowerDocument>('POST', `/api/staff/borrowers/${id}/documents`, form)
+    },
+    removeDocument: (id: number, docId: number, reason: string) =>
+      request<void>('POST', `/api/staff/borrowers/${id}/documents/${docId}/remove`, { reason }),
+    scanId: (id: number, docId: number) => request<IdScan>('POST', `/api/staff/borrowers/${id}/documents/${docId}/scan`),
+    setPhoto: (id: number, photo: Blob) => {
+      const form = new FormData()
+      form.append('file', photo, 'photo.jpg')
+      return request<void>('PUT', `/api/staff/borrowers/${id}/photo`, form)
     },
     apply: (id: number, body: { amount: string; months: number; purpose: string }) =>
       request<LoanSummary>('POST', `/api/staff/borrowers/${id}/applications`, body),
@@ -186,6 +220,7 @@ export const api = {
 
 /** Links for files the browser downloads directly (the session cookie goes with them). */
 export const files = {
+  photo: (borrowerId: number) => `/api/staff/borrowers/${borrowerId}/photo`,
   document: (borrowerId: number, docId: number) => `/api/staff/borrowers/${borrowerId}/documents/${docId}`,
   loanDocument: (loanId: number, docId: number) => `/api/staff/loans/${loanId}/documents/${docId}`,
   agreement: (loanId: number) => `/api/staff/loans/${loanId}/agreement.pdf`,

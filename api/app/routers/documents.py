@@ -20,7 +20,7 @@ AGREEMENT_STATES = {"APPROVED", "ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED"}
 STATEMENT_STATES = {"ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED", "WRITTEN_OFF"}
 
 
-def _company(svc: Services) -> pdf.Company:
+def company_of(svc: Services) -> pdf.Company:
     s = svc.settings
     return pdf.Company(s.company_name, s.company_address, s.company_phone, s.company_email)
 
@@ -34,7 +34,7 @@ def _pdf(data: bytes, name: str) -> Response:
 
 
 def _render(svc: Services, loan: LoanDetail, kind: str) -> Response:
-    today, company = svc.today(), _company(svc)
+    today, company = svc.today(), company_of(svc)
     ways = ways_to_pay(svc.settings.company_name, loan.payment_reference)
     builders: dict[str, tuple[set[str] | None, Callable[[], bytes], str]] = {
         "agreement": (
@@ -78,7 +78,7 @@ async def receipt(
     payment = next((p for p in loan.payments if p.id == payment_id), None)
     if payment is None:
         raise HTTPException(404, "That payment was not found on this loan.")
-    return _pdf(pdf.receipt(loan, payment, _company(svc), svc.today()), f"RC-{payment_id}.pdf")
+    return _pdf(pdf.receipt(loan, payment, company_of(svc), svc.today()), f"RC-{payment_id}.pdf")
 
 
 async def _portal_loan(me: PortalSession, svc: Services) -> LoanDetail:

@@ -7,7 +7,7 @@ import {
 import { Button, DataTable, ErrorNote, Field, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
 import { pillFor } from '../lib/loan'
-import { DownloadLink } from '../components/DownloadLink'
+import { DocumentViewer, fileSize } from '../components/DocumentViewer'
 
 const KYC_KINDS: DocumentKind[] = ['id', 'payslip', 'bank_statement', 'deduction_authority']
 const TERMS = [3, 6, 12, 18, 24, 36]
@@ -18,19 +18,22 @@ export function BorrowerProfile() {
   const q = useQuery({ queryKey: ['borrower', id], queryFn: () => api.staff.borrower(id) })
   if (q.error) return <ErrorNote error={q.error} retry={() => q.refetch()} />
   if (!q.data) return <Skeleton h={400} />
-  return <ProfileView p={q.data} />
+  return <ProfileView p={q.data} version={q.dataUpdatedAt} />
 }
 
-function ProfileView({ p }: { p: Profile }) {
+function ProfileView({ p, version }: { p: Profile; version: number }) {
   const b = p.borrower
   const pending = p.loans.find((l) => l.state === 'PENDING')
   return (
     <>
       <div className="text-[13px] text-ink-muted"><Link to="/staff/borrowers">Borrowers</Link> / {b.name}</div>
       <header className="flex flex-wrap justify-between items-start gap-4">
-        <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-4">
+          <Portrait p={p} version={version} />
+          <div className="flex flex-col gap-1">
           <h1 className="ml-title">{b.name}</h1>
           <span className="text-ink-muted">{b.phone ?? 'No phone'} · {b.employer ?? 'Employer not recorded'}</span>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
           {p.kyc.complete
@@ -74,6 +77,98 @@ function ProfileView({ p }: { p: Profile }) {
         </div>
       </div>
     </>
+  )
+}
+
+function Portrait({ p, version }: { p: Profile; version: number }) {
+  const b = p.borrower
+  const initials = b.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()
+  const box = 'shrink-0 w-16 h-20 rounded-md border border-line overflow-hidden'
+  // The profile's fetch time changes the URL after a new photo, so the browser doesn't show the old one.
+  return b.has_photo
+    ? <img src={`${files.photo(b.id)}?v=${version}`} alt={`Photo of ${b.name}`} className={`${box} object-cover`} />
+    : <span className={`${box} grid place-items-center bg-surface-sunken text-ink-muted font-semibold`} title="No photo yet: open the ID document and read the card" aria-hidden="true">{initials}</span>
+}
+
+/** Decode a data: URL here rather than fetch() it, which the app's Content-Security-Policy (connect-src) blocks. */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const [head, body = ''] = dataUrl.split(',', 2)
+  const type = /^data:([^;,]+)/.exec(head)?.[1] ?? 'application/octet-stream'
+  const bin = atob(body)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Blob([bytes], { type })
+}
+
+/** Read the ID card: crop the photo for the profile and offer the printed details for the edit form. */
+function IdCardReader({ p, docId }: { p: Profile; docId: number }) {
+  const b = p.borrower
+  const qc = useQueryClient()
+  const nav = useNavigate()
+  const scan = useMutation({ mutationFn: () => api.staff.scanId(b.id, docId) })
+  const save = useMutation({
+    mutationFn: (dataUrl: string) => api.staff.setPhoto(b.id, dataUrlToBlob(dataUrl)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['borrower', b.id] }),
+  })
+  const s = scan.data?.suggestions
+  const rows: [string, string | null | undefined, string | null | undefined][] = s ? [
+    ['Name', [s.first_name, s.last_name].filter(Boolean).join(' ') || null, b.name],
+    ['NID number', s.national_id, b.national_id],
+    ['Date of birth', s.date_of_birth ? formatDate(s.date_of_birth) : null, b.date_of_birth ? formatDate(b.date_of_birth) : null],
+    ['Gender', s.gender ? (s.gender === 'female' ? 'Female' : 'Male') : null, b.gender ? (b.gender === 'female' ? 'Female' : 'Male') : null],
+  ] : []
+  const differs = rows.some(([, card, file]) => card && card.toLowerCase() !== (file ?? '').toLowerCase())
+
+  if (!scan.data) {
+    return (
+      <div className="flex flex-col gap-1 border-t border-line pt-3">
+        <Button size="sm" variant="secondary" className="self-start" disabled={scan.isPending} onClick={() => scan.mutate()}>
+          {scan.isPending ? 'Reading the card…' : 'Read ID card: photo and details'}
+        </Button>
+        <span className="text-[12px] text-ink-muted">Finds the photo for the borrower's profile and reads the NID number, name and date of birth for you to check.</span>
+        {scan.error && <span className="text-[13px] text-danger" role="alert">{(scan.error as Error).message}</span>}
+      </div>
+    )
+  }
+  const r = scan.data
+  return (
+    <div className="flex flex-col gap-3 border-t border-line pt-3" aria-label="Read from the ID card">
+      <h3 className="m-0 text-[15px] font-semibold">Read from the card</h3>
+      {r.problems.map((m) => <span key={m} className="text-[13px] text-warning">{m}</span>)}
+      <div className="flex flex-wrap gap-4 items-start">
+        {r.photo && (
+          <div className="flex flex-col gap-2 items-start">
+            <img src={r.photo} alt="Photo found on the ID card" className="w-[120px] h-[150px] rounded-md border border-line object-cover" />
+            {save.isSuccess
+              ? <span className="text-[13px] text-success" role="status">Saved as the profile photo</span>
+              : <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate(r.photo!)}>{save.isPending ? 'Saving…' : 'Use as profile photo'}</Button>}
+            {save.error && <span className="text-[12px] text-danger" role="alert">{(save.error as Error).message}</span>}
+          </div>
+        )}
+        {rows.length > 0 && r.text_read && (
+          <div className="flex flex-col gap-2 min-w-0 flex-1">
+            <table className="text-[13px] border-collapse w-full">
+              <thead><tr className="text-left text-ink-muted"><th className="font-medium pr-3">Detail</th><th className="font-medium pr-3">On the card</th><th className="font-medium">On file</th></tr></thead>
+              <tbody>
+                {rows.map(([k, card, file]) => (
+                  <tr key={k} className="border-t border-line">
+                    <td className="py-1 pr-3 text-ink-muted">{k}</td>
+                    <td className={`py-1 pr-3 ${card && card.toLowerCase() !== (file ?? '').toLowerCase() ? 'font-semibold' : ''}`}>{card ?? '—'}</td>
+                    <td className="py-1">{file ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <span className="text-[12px] text-ink-muted">Read by machine, so letters and numbers can be wrong. Check against the card.</span>
+            {differs && (
+              <Button size="sm" variant="secondary" className="self-start" onClick={() => nav(`/staff/borrowers/${b.id}/edit`, { state: { fromCard: r.suggestions } })}>
+                Update details from the card…
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -140,17 +235,35 @@ function KycChecklist({ p }: { p: Profile }) {
 }
 
 function Documents({ p }: { p: Profile }) {
-  const size = (n: number) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`)
+  const qc = useQueryClient()
+  const [open, setOpen] = useState<number | null>(null)
+  const doc = p.documents.find((d) => d.id === open)
+  const bid = p.borrower.id
+  const remove = async (docId: number, reason: string) => {
+    await api.staff.removeDocument(bid, docId, reason)
+    qc.invalidateQueries({ queryKey: ['borrower', bid] })
+    qc.invalidateQueries({ queryKey: ['kyc', bid] })
+  }
   return (
     <section className="ml-card p-0 overflow-hidden" style={{ padding: 0 }}>
       <h2 className="ml-h2 px-6 py-4">Documents on file</h2>
-      <DataTable rows={p.documents} empty="No documents yet. Upload them from the checklist."
+      <DataTable rows={p.documents} empty="No documents yet. Upload them from the checklist." onRowClick={(d) => setOpen(d.id)}
         columns={[
-          { key: 'kind', label: 'Document', render: (d) => DOCUMENT_LABELS[d.kind] },
-          { key: 'file_name', label: 'File', render: (d) => <DownloadLink href={files.document(p.borrower.id, d.id)}>{d.file_name}</DownloadLink> },
+          { key: 'kind', label: 'Document', render: (d) => DOCUMENT_LABELS[d.kind] ?? d.kind },
+          { key: 'file_name', label: 'File', render: (d) => <button className="ml-linkbtn text-left break-all" onClick={(e) => { e.stopPropagation(); setOpen(d.id) }}>{d.file_name}</button> },
           { key: 'uploaded_on', label: 'Uploaded', render: (d) => formatDate(d.uploaded_on) },
-          { key: 'size', label: 'Size', align: 'right', render: (d) => size(d.size) },
+          { key: 'size', label: 'Size', align: 'right', render: (d) => fileSize(d.size) },
         ]} />
+      {p.notes.length > 0 && (
+        <div className="px-6 py-4 border-t border-line flex flex-col gap-1">
+          <h3 className="m-0 text-[13px] font-semibold text-ink-muted">File notes</h3>
+          <ul className="m-0 pl-[18px] text-[13px] flex flex-col gap-1">
+            {p.notes.map((n, i) => <li key={i}>{formatDate(n.when)} · {n.text}{n.who && <span className="text-ink-muted"> · {n.who}</span>}</li>)}
+          </ul>
+        </div>
+      )}
+      {doc && <DocumentViewer doc={doc} href={files.document(bid, doc.id)} onClose={() => setOpen(null)} onRemove={(reason) => remove(doc.id, reason)}
+        extra={doc.kind === 'id' ? <IdCardReader key={doc.id} p={p} docId={doc.id} /> : undefined} />}
     </section>
   )
 }

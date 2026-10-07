@@ -49,6 +49,7 @@ from ..domain.models import (
     Installment,
     LoanDetail,
     LoanEvent,
+    LoanReview,
     LoanState,
     LoanSummary,
     NextOfKin,
@@ -59,12 +60,14 @@ from ..domain.models import (
     RepaymentIn,
     StaffUser,
 )
+from ..domain.search import match_score, rank
 from .base import AuthFailed, BackendError, NotFound, normalise_phone
 
 ZERO = Decimal("0")
 BORROWER_TABLE = "dt_borrower_financials"
 PROFILE_TABLE = "dt_borrower_profile"
 ASSESSMENT_TABLE = "dt_loan_assessment"
+REVIEW_TABLE = "dt_loan_review"  # the officer's review and the manager's reply (see underwriting/bootstrap.py)
 DATE_FMT = {"locale": "en", "dateFormat": "yyyy-MM-dd"}
 STATUS: dict[int, LoanState] = {
     100: "PENDING",
@@ -125,6 +128,10 @@ def fineract_message(resp: httpx.Response) -> str:
     )
 
 
+async def _none() -> None:
+    return None
+
+
 class FineractBackend:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
         self.s = settings
@@ -139,6 +146,7 @@ class FineractBackend:
         ).decode()
         self._payment_types: dict[str, int] | None = None
         self._cache: dict[str, tuple[float, Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._sem = asyncio.Semaphore(8)
         self._zone = _local_zone(settings.timezone)
 
@@ -296,10 +304,61 @@ class FineractBackend:
         if states:
             out = [s for s in out if s.state in states]
         pending = [s for s in out if s.state == "PENDING"]  # show the recommendation in the approvals list
-        found = await asyncio.gather(*(self._datatable(cred, ASSESSMENT_TABLE, s.id) for s in pending))
-        for s, a in zip(pending, found, strict=True):
+        found, reviews = await asyncio.gather(
+            asyncio.gather(*(self._datatable(cred, ASSESSMENT_TABLE, s.id) for s in pending)),
+            asyncio.gather(*(self._review(cred, s.id) for s in pending)),
+        )
+        for s, a, r in zip(pending, found, reviews, strict=True):
             s.recommendation = (a or {}).get("recommendation")
+            s.review_stage = r.stage if r else None
         return out
+
+    async def _has_review_table(self, cred: str) -> bool:
+        async def check() -> bool:
+            try:
+                await self._get(cred, f"/datatables/{REVIEW_TABLE}")
+                return True
+            except AuthFailed:
+                raise
+            except BackendError as e:
+                log.error("%s isn't set up in Fineract (run underwriting/bootstrap.py): %s", REVIEW_TABLE, e.message)
+                return False
+
+        return bool(await self._cached(f"table:{REVIEW_TABLE}", 60, check))
+
+    async def _review(self, cred: str, loan_id: int) -> LoanReview | None:
+        """The officer's review, or None when it can't be read (table missing or no permission): the API then
+        refuses to send up or decide the loan, saying why, instead of treating it as not yet reviewed."""
+        if not await self._has_review_table(cred):
+            return None
+        try:
+            row = await self._datatable(cred, REVIEW_TABLE, loan_id)
+        except AuthFailed:
+            raise
+        except BackendError as e:
+            log.warning("Could not read %s for loan %s: %s", REVIEW_TABLE, loan_id, e.message)
+            return None
+        if not row or row.get("stage") not in ("DRAFT", "SUBMITTED", "RETURNED"):
+            return LoanReview()
+        return LoanReview(
+            stage=row["stage"],
+            officer_recommendation=row.get("officer_recommendation") or None,
+            officer_amount=dec(row["officer_amount"]) if row.get("officer_amount") is not None else None,
+            officer_note=row.get("officer_note"),
+            submitted_by=row.get("submitted_by"),
+            submitted_user=row.get("submitted_user"),
+            submitted_on=fdate(row.get("submitted_on")),
+            returned_note=row.get("returned_note"),
+            returned_by=row.get("returned_by"),
+            returned_on=fdate(row.get("returned_on")),
+        )
+
+    async def save_review(self, cred: str, loan_id: int, review: LoanReview) -> None:
+        values = review.model_dump()
+        for k in ("submitted_on", "returned_on"):
+            values[k] = values[k].isoformat() if values[k] else None
+        await self._upsert(cred, REVIEW_TABLE, loan_id, values, clear_empty=True)
+        self._invalidate()
 
     async def _schedule(self, cred: str, loan_id: int) -> tuple[dict, list[Installment]]:
         raw = await self._get(cred, f"/loans/{loan_id}?associations=repaymentSchedule,transactions")
@@ -326,12 +385,16 @@ class FineractBackend:
     async def get_loan(self, cred: str, loan_id: int, today: date) -> LoanDetail:
         raw, inst = await self._schedule(cred, loan_id)
         client_id = int(raw["clientId"])
-        borrower, a, notes = await asyncio.gather(
+        pending = int((raw.get("status") or {}).get("id") or 0) == 100 and cred != "portal"
+        borrower, a, notes, review = await asyncio.gather(
             self._borrower(cred, client_id),
             self._datatable(cred, ASSESSMENT_TABLE, loan_id),
             self._loan_notes(cred, loan_id),
+            self._review(cred, loan_id) if pending else _none(),
         )
         s = self._summary(raw, today, a)
+        if review:
+            s.review_stage = review.stage
         unpaid = [i for i in inst if not i.complete]
         nxt = unpaid[0] if unpaid and s.state in LIVE else None
         assessment = None
@@ -390,6 +453,7 @@ class FineractBackend:
             history=list(reversed(history)),
             payments=payments,
             payment_reference=f"BL{raw.get('accountNo', loan_id)}",
+            review=review,
         )
 
     async def save_assessment(self, cred: str, loan_id: int, assessment: Assessment) -> None:
@@ -753,6 +817,7 @@ class FineractBackend:
             if fin.get("monthly_business_noi") not in (None, "")
             else None,
             income_verified=fin.get("income_verified"),
+            has_photo=bool(client.get("imagePresent") or client.get("imageId")),
         )
 
     async def _profile(self, cred: str, client_id: int) -> dict | None:
@@ -774,29 +839,66 @@ class FineractBackend:
 
         return await self._cached(f"code:{code_name}", 600, load)
 
-    async def search_borrowers(self, cred: str, query: str, limit: int = 50) -> list[BorrowerListItem]:
-        q = query.strip()
-        if not q:
-            page = await self._get(cred, f"/clients?limit={limit}&orderBy=displayName&sortOrder=ASC")
-            return [
-                BorrowerListItem(id=int(c["id"]), name=c.get("displayName", ""), phone=c.get("mobileNo"))
-                for c in page.get("pageItems", [])
-            ]
-        hits = await self._get(cred, f"/search?query={quote(q)}&resource=clients,clientIdentifiers&exactMatch=false")
-        out: dict[int, BorrowerListItem] = {}
+    async def _client_index(self, cred: str) -> list[dict]:
+        """Every client this user may see (id, name, phone), kept for a minute so searching as you type is quick.
+
+        Fineract's own search is an SQL LIKE, which is case-sensitive on PostgreSQL and needs the words
+        in order, so McLender matches names itself (see domain/search.py)."""
+        who = hashlib.sha256(cred.encode()).hexdigest()
+
+        async def load() -> list[dict]:
+            out: list[dict] = []
+            page_size = 500
+            while len(out) < 20000:
+                page = await self._get(
+                    cred, f"/clients?offset={len(out)}&limit={page_size}&orderBy=displayName&sortOrder=ASC"
+                )
+                items = page.get("pageItems", []) if isinstance(page, dict) else []
+                out.extend(
+                    {"id": int(c["id"]), "name": c.get("displayName") or "", "phone": c.get("mobileNo")} for c in items
+                )
+                if len(items) < page_size:
+                    break
+            return out
+
+        key = f"clients:{who}"
+        # One load at a time per user: searching as you type mustn't start a full load per keystroke.
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            return await self._cached(key, 60, load)
+
+    async def _nid_hits(self, cred: str, query: str) -> dict[int, str]:
+        """Clients whose NID holds the digits typed, however they were spaced or dashed."""
+        run = "".join(c for c in query if c.isdigit())
+        groups = re.findall(r"\d+", query)
+        if len(run) < 4 or not groups:
+            return {}
+        probe = max(groups, key=len)  # one group as Fineract stored it; the full number is checked below
+        try:
+            hits = await self._get(cred, f"/search?query={quote(probe)}&resource=clientIdentifiers&exactMatch=false")
+        except BackendError as e:  # names and phone numbers still work
+            log.warning("NID search failed: %s", e.message)
+            return {}
+        out: dict[int, str] = {}
         for h in hits or []:
-            kind = (h.get("entityType") or "").upper()
-            cid = int(h["entityId"]) if kind == "CLIENT" else int(h.get("parentId") or 0)
-            if not cid or cid in out:
-                continue
-            name = h.get("entityName") if kind == "CLIENT" else h.get("parentName")
-            out[cid] = BorrowerListItem(
-                id=cid,
-                name=name or "",
-                phone=h.get("entityMobileNo") if kind == "CLIENT" else None,
-                national_id=h.get("entityName") if kind != "CLIENT" else None,
-            )
-        return list(out.values())[:limit]
+            owner = int(h.get("parentId") or 0)
+            nid = h.get("entityName") or ""
+            if owner and run in "".join(c for c in nid if c.isdigit()):
+                out[owner] = nid
+        return out
+
+    async def search_borrowers(self, cred: str, query: str, limit: int = 50) -> list[BorrowerListItem]:
+        clients, nids = await asyncio.gather(self._client_index(cred), self._nid_hits(cred, query))
+        just_a_number = bool(re.fullmatch(r"[\d\s-]+", query.strip()))
+
+        def score(c: dict) -> int:
+            if just_a_number and c["id"] in nids:
+                return 100  # the NID typed in full: put that person first
+            return match_score(query, c["name"], (), [c["phone"], nids.get(c["id"])])
+
+        hits = rank(query, clients, score, lambda c: c["name"], limit)
+        return [
+            BorrowerListItem(id=c["id"], name=c["name"], phone=c["phone"], national_id=nids.get(c["id"])) for c in hits
+        ]
 
     async def get_borrower(self, cred: str, borrower_id: int) -> Borrower:
         return await self._borrower(cred, borrower_id)
@@ -979,6 +1081,49 @@ class FineractBackend:
         meta = await self._get(cred, f"/clients/{borrower_id}/documents/{doc_id}")
         resp = await self._send(cred, "GET", f"/clients/{borrower_id}/documents/{doc_id}/attachment")
         return self._document(meta), resp.content
+
+    async def set_photo(self, cred: str, borrower_id: int, jpeg: bytes) -> None:
+        """The client's picture in Mifos X (shown on the client page there too)."""
+        await self._send(
+            cred, "POST", f"/clients/{borrower_id}/images", files={"file": ("photo.jpg", jpeg, "image/jpeg")}
+        )
+        self._invalidate()
+
+    async def get_photo(self, cred: str, borrower_id: int) -> bytes | None:
+        try:
+            resp = await self._send(cred, "GET", f"/clients/{borrower_id}/images", accept="text/plain")
+        except NotFound:
+            return None
+        body = resp.content
+        if body.startswith(b"data:"):  # Fineract answers with a data URL by default
+            try:
+                return base64.b64decode(body.split(b",", 1)[1], validate=False)
+            except (IndexError, ValueError):
+                return None
+        return body or None
+
+    async def delete_document(self, cred: str, borrower_id: int, doc_id: int) -> None:
+        await self._req(cred, "DELETE", f"/clients/{borrower_id}/documents/{doc_id}")
+
+    async def delete_loan_document(self, cred: str, loan_id: int, doc_id: int) -> None:
+        await self._req(cred, "DELETE", f"/loans/{loan_id}/documents/{doc_id}")
+
+    async def add_client_note(self, cred: str, borrower_id: int, text: str, today: date) -> None:
+        await self._post(cred, f"/clients/{borrower_id}/notes", {"note": text[:1000]})
+
+    async def client_notes(self, cred: str, borrower_id: int) -> list[LoanEvent]:
+        try:
+            raws = await self._get(cred, f"/clients/{borrower_id}/notes")
+        except BackendError as e:
+            log.warning("Could not read notes for client %s: %s", borrower_id, e.message)
+            return []
+        keyed = []
+        for n in raws or []:
+            when = _note_time(n.get("createdOn"), self._zone)
+            if when and n.get("note"):
+                event = LoanEvent(when=when.date().isoformat(), text=n["note"], who=n.get("createdByUsername"))
+                keyed.append(((when.isoformat(), int(n.get("id") or 0)), event))
+        return [e for _, e in sorted(keyed, key=lambda p: p[0], reverse=True)]
 
     async def create_application(self, cred: str, borrower_id: int, body: ApplicationIn, today: date) -> LoanSummary:
         accounts = await self._get(cred, f"/clients/{borrower_id}/accounts")

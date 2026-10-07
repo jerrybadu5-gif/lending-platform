@@ -33,17 +33,36 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 |---|---|---|
 | Staff sign-in | `/staff/login` | Fineract username and password |
 | Dashboard | `/staff` | Gross portfolio, active loans, PAR30, due today, waiting approvals, arrears by age |
-| Applications | `/staff/applications` | Pending (with the check result), approved and not disbursed, rejected |
-| Loan review | `/staff/loans/:id` | Borrower facts, schedule, affordability card, approve (amount defaults to policy capacity), reject (reason required, confirmed, SMS sent), record disbursement, history |
-| Borrowers | `/staff/borrowers` | Search by name, phone, NID or employer |
+| Applications | `/staff/applications` | Loan officer: to review, with the credit manager, approved not paid out, rejected. Credit manager: waiting for your decision, with loan officers, approved not paid out, rejected |
+| Loan review | `/staff/loans/:id` | Borrower facts, the borrower's documents shown in the page, schedule, affordability card, history. Loan officer: recommend approve (with an amount) or decline, with a written assessment, and send to the credit manager (approve needs the documents complete). Credit manager, once sent: the officer's recommendation, then approve (amount defaults to the officer's), reject (reason required, confirmed, SMS sent) or send back with a note |
+| Borrowers | `/staff/borrowers` | Search by name, phone or NID: any case, any word order, part words and one-letter typos |
 | New / edit borrower | `/staff/borrowers/new`, `/staff/borrowers/:id/edit` | Personal details, NID, contact, employer and payroll number, income, bank account for payout, next of kin. Must be 18+; phone and NID must be unique |
-| Borrower profile | `/staff/borrowers/:id` | Details, KYC checklist with uploads (ID, payslips, bank statement, payroll deduction authority), documents on file, loans, new loan application (checked at once) |
-| Repayments | `/staff/repayments` | Due today, in arrears, all open; record a repayment by method with a reference; receipt plus SMS |
-| Pay-out steps | Loan review, once approved | 1 print the agreement; 2 tell the borrower to come and sign (SMS sent automatically on approval; send again, at most twice in 10 minutes, or log a phone call, each saved as a loan note; until an SMS provider is connected the note says the SMS was not delivered, and only a logged call ticks the step); 3 upload the signed agreement to the loan; 4 record the pay-out (bank transfer, mobile money or cash, account and reference), which needs step 3. The borrower gets an SMS when the money is paid out |
+| Borrower profile | `/staff/borrowers/:id` | Photo, details, KYC checklist with uploads (ID, payslips, bank statement, payroll deduction authority), documents on file (open to preview, download, or remove a wrong upload with a reason; a document that was on file when a loan was approved can't be removed), file notes, loans, new loan application (checked at once). On an ID document, "Read ID card" crops the holder's photo (saved as the client image in Mifos X when staff choose) and reads the NID number, name, date of birth and sex for staff to check and copy into the edit form |
+| Repayments | `/staff/repayments` | Due today, in arrears, all open; record a repayment by method with a reference; receipt plus SMS. The receipt stays on screen, every receipt recorded is listed below, and a PDF copy is filed on the loan in Fineract |
+| Pay-out steps | Loan review, once approved | Loan officers do steps 1 to 3; only a credit manager records step 4. 1 print the agreement; 2 tell the borrower to come and sign (SMS sent automatically on approval; send again, at most twice in 10 minutes, or log a phone call, each saved as a loan note; until an SMS provider is connected the note says the SMS was not delivered, and only a logged call ticks the step); 3 upload the signed agreement to the loan (open it to check; a wrong one can be removed with a reason until pay-out); 4 record the pay-out (bank transfer, mobile money or cash, account and reference), which needs step 3. The borrower gets an SMS when the money is paid out |
 | Printed documents | Loan review, repayment receipt | Loan agreement (once approved; marked DRAFT until `MCL_AGREEMENT_REVIEWED=true`), repayment schedule, statement, receipts, all PDF |
 | Borrower sign-in | `/portal/login` | Phone, then a 6-digit SMS code valid for 5 minutes, 5 tries |
 | Borrower home | `/portal` | Left to pay, progress, next or overdue payment, ways to pay with reference, recent payments, statement and schedule PDFs |
 | Apply | `/portal/apply` | Amount and term chips, live quote, income and debts, sends an application that is checked at once |
+
+## Roles
+
+| | Loan officer | Credit manager |
+|---|---|---|
+| Sign up borrowers, upload and remove documents, read ID cards | Yes | Yes |
+| Take applications, run the affordability check | Yes | Yes |
+| Recommend and send an application for approval | Yes | Yes, but then another credit manager approves it |
+| Approve, reject, send back | No | Only applications sent for approval; never approve one they sent up themselves |
+| Pay-out steps 1 to 3 (agreement, contact, signed copy) | Yes | Yes |
+| Record the pay-out | No | Yes |
+| Record repayments | Yes | Yes |
+
+The role comes from the Fineract user's roles: Credit Manager, Branch Manager and Super user decide; anyone else
+prepares. The API enforces this; the screens only follow it. The officer's review is kept in the Fineract data
+table `dt_loan_review` (stage, recommendation, amount, note, who and when, and the manager's reply if sent back),
+and each step is also written as a loan note. `MCL_REVIEW_REQUIRED=false` turns the send-for-approval step off;
+`MCL_ALLOW_SELF_APPROVAL=true` lets a credit manager approve what they sent up (a branch with one manager and no officer).
+If `dt_loan_review` is missing in Fineract, sending up and deciding are refused with a message saying so.
 
 ## Security
 

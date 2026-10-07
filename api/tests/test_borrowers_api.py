@@ -114,6 +114,14 @@ def test_staff_application_is_assessed(staff):
     assert again.status_code == 409
 
 
+def send_up(staff, loan_id, advice="APPROVE"):
+    # These tests are about documents: let the credit manager send up and decide alone.
+    staff.app.state.services.settings.allow_self_approval = True
+    r = staff.post(f"/api/staff/loans/{loan_id}/submit", json={"recommendation": advice, "note": "Checked and ready."})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_approval_needs_kyc_documents(staff):
     # Joyce Ilave (loan 542) has no bank statement or payroll deduction authority yet.
     r = staff.post("/api/staff/loans/542/approve", json={"amount": "6500"})
@@ -124,11 +132,13 @@ def test_approval_needs_kyc_documents(staff):
             "/api/staff/borrowers/10/documents", data={"kind": kind}, files={"file": (f"{kind}.pdf", PDF, "x")}
         )
         assert up.status_code == 201
+    send_up(staff, 542)
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).json()["state"] == "APPROVED"
 
 
 def test_kyc_gate_can_be_turned_off(staff):
     staff.app.state.services.settings.kyc_required_for_approval = False
+    send_up(staff, 542)
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
 
 
@@ -148,6 +158,7 @@ def test_safe_file_names():
 def test_disbursement_also_needs_kyc(staff):
     # A loan approved elsewhere (or before the check existed) can't be paid out without documents.
     staff.app.state.services.settings.kyc_required_for_approval = False
+    send_up(staff, 542)
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
     staff.app.state.services.settings.kyc_required_for_approval = True
     r = staff.post("/api/staff/loans/542/disburse", json={"reference": "TT-1"})
@@ -167,3 +178,24 @@ def test_webp_is_refused(staff):
     webp = b"RIFF\x00\x00\x00\x00WEBPVP8 "
     r = staff.post("/api/staff/borrowers/1/documents", data={"kind": "id"}, files={"file": ("a.webp", webp, "x")})
     assert r.status_code == 422
+
+
+def test_remove_wrong_upload_needs_a_reason_and_is_logged(staff):
+    b = create(staff)
+    url = f"/api/staff/borrowers/{b['id']}/documents"
+    doc = staff.post(url, data={"kind": "payslip"}, files={"file": ("wrong.pdf", PDF, "application/pdf")}).json()
+    assert staff.post(f"{url}/{doc['id']}/remove", json={"reason": ""}).status_code == 422
+    r = staff.post(f"{url}/{doc['id']}/remove", json={"reason": "Wrong   person's payslip"})
+    assert r.status_code == 204
+    p = staff.get(f"/api/staff/borrowers/{b['id']}").json()
+    assert p["documents"] == [] and p["kyc"]["have"] == {}
+    assert p["notes"][0]["text"] == "Removed Latest 3 payslips: wrong.pdf. Reason: Wrong person's payslip"
+    assert staff.post(f"{url}/{doc['id']}/remove", json={"reason": "again"}).status_code == 404
+
+
+def test_documents_behind_an_approval_stay_on_file(staff):
+    p = staff.get("/api/staff/borrowers/1").json()  # Mary Kila has an active loan
+    assert any(lo["state"] == "ACTIVE" for lo in p["loans"])
+    doc = p["documents"][0]
+    r = staff.post(f"/api/staff/borrowers/1/documents/{doc['id']}/remove", json={"reason": "tidy up"})
+    assert r.status_code == 409 and "supported the approval" in r.json()["detail"]

@@ -12,10 +12,12 @@ LoanState = Literal[
     "PENDING", "APPROVED", "REJECTED", "ACTIVE", "ARREARS", "ARREARS_LATE", "CLOSED", "WRITTEN_OFF", "WITHDRAWN"
 ]
 Recommendation = Literal["APPROVE", "REFER", "DECLINE"]
+ReviewStage = Literal["DRAFT", "SUBMITTED", "RETURNED"]
+OfficerAdvice = Literal["APPROVE", "DECLINE"]
 InterestMethod = Literal["DECLINING_BALANCE", "FLAT"]
 PaymentMethod = Literal["cash", "bank", "mobile", "payroll"]
 Gender = Literal["female", "male"]
-DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other", "signed_agreement"]
+DocumentKind = Literal["id", "payslip", "bank_statement", "deduction_authority", "other", "signed_agreement", "receipt"]
 
 DOCUMENT_LABELS: dict[str, str] = {
     "id": "ID (NID card, passport or driver's licence)",
@@ -24,7 +26,10 @@ DOCUMENT_LABELS: dict[str, str] = {
     "deduction_authority": "Payroll deduction authority (signed)",
     "other": "Other document",
     "signed_agreement": "Signed loan agreement",
+    "receipt": "Payment receipt",
 }
+# Kinds staff upload on a borrower's profile (signed agreements and receipts belong to a loan).
+BORROWER_DOCUMENT_KINDS = {"id", "payslip", "bank_statement", "deduction_authority", "other"}
 
 
 class StaffUser(BaseModel):
@@ -63,6 +68,7 @@ class Borrower(BaseModel):
     credit_score: int | None = None
     monthly_business_noi: Decimal | None = None
     income_verified: bool | None = None
+    has_photo: bool = False
 
 
 class Installment(BaseModel):
@@ -107,6 +113,7 @@ class LoanSummary(BaseModel):
     next_due_amount: Decimal | None = None
     submitted_on: date | None = None
     recommendation: Recommendation | None = None
+    review_stage: ReviewStage | None = None  # pending loans only: where the officer's review is
 
 
 class Payment(BaseModel):
@@ -123,6 +130,31 @@ class LoanEvent(BaseModel):
     who: str | None = None
 
 
+class LoanReview(BaseModel):
+    """The loan officer's review of a pending application, and the credit manager's reply if sent back."""
+
+    stage: ReviewStage = "DRAFT"
+    officer_recommendation: OfficerAdvice | None = None
+    officer_amount: Decimal | None = None
+    officer_note: str | None = None
+    submitted_by: str | None = None
+    submitted_user: str | None = None  # username, to stop someone approving what they sent up themselves
+    submitted_on: date | None = None
+    returned_note: str | None = None
+    returned_by: str | None = None
+    returned_on: date | None = None
+
+
+class SubmitIn(BaseModel):
+    recommendation: OfficerAdvice
+    amount: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    note: str = Field(min_length=10, max_length=1000)
+
+
+class ReturnIn(BaseModel):
+    note: str = Field(min_length=3, max_length=1000)
+
+
 class LoanDetail(LoanSummary):
     approved_on: date | None = None
     interest_method: InterestMethod = "DECLINING_BALANCE"
@@ -134,6 +166,7 @@ class LoanDetail(LoanSummary):
     history: list[LoanEvent] = []
     payments: list[Payment] = []
     payment_reference: str
+    review: LoanReview | None = None  # pending loans only
 
 
 class Dashboard(BaseModel):
@@ -196,6 +229,7 @@ class Receipt(BaseModel):
     received_on: date
     sms_sent_to: str | None = None
     payment_id: int | None = None  # for printing the receipt as a PDF
+    filed: bool = False  # a PDF copy was saved on the loan
 
 
 class DisburseIn(BaseModel):
@@ -299,11 +333,31 @@ class BorrowerListItem(BaseModel):
     employer: str | None = None
 
 
+class RemoveIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=300)
+
+
 class BorrowerProfile(BaseModel):
     borrower: Borrower
     documents: list[BorrowerDocument]
     kyc: KycStatus
     loans: list[LoanSummary]
+    notes: list[LoanEvent] = []  # the borrower's file notes, newest first (e.g. documents removed and why)
+
+
+class IdSuggestionsOut(BaseModel):
+    national_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    date_of_birth: date | None = None
+    gender: Gender | None = None
+
+
+class IdScanOut(BaseModel):
+    photo: str | None = None  # data:image/jpeg;base64,... for staff to check before saving
+    suggestions: IdSuggestionsOut
+    text_read: bool
+    problems: list[str] = []
 
 
 class ApplicationIn(BaseModel):

@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     kyc_required: dict[str, int] = Field(
         default_factory=lambda: {"id": 1, "payslip": 1, "bank_statement": 1, "deduction_authority": 1}
     )
+    # Loan officer reviews and submits; only then can a credit manager approve, reject or send it back.
+    review_required: bool = True
+    # A credit manager who sent an application up themselves can't also approve it, unless this is true
+    # (a branch with a single credit manager and no loan officer).
+    allow_self_approval: bool = False
     kyc_required_for_approval: bool = True
     # A loan is paid out only once the borrower's signed agreement is uploaded to it.
     signed_agreement_required: bool = True

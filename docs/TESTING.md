@@ -16,31 +16,41 @@ Sample data is dated from today, so "due today" always has loans in it. Close an
 - [ ] "Arrears by age" shows the 1–30 and 31–60 day amounts.
 
 **Review a loan: Peter Wambi (K 15,000, Refer)**
+- [ ] Applications opens on "Waiting for your decision": Grace Tom, Peter Wambi and Samuel's business loan, each "Sent for approval".
 - [ ] The affordability card shows DTI 44.5% against a 40% limit, and "most we can lend" K 13,113.42.
-- [ ] The approved amount starts at 13,100.00.
+- [ ] The Decision card starts with "Loan officer recommends approving K 13,000.00" and John's note. The approved amount starts at 13,000.00.
+- [ ] The Documents card shows his ID, payslips, bank statement and deduction authority in the page, one tab each.
 - [ ] Approve: a message confirms, the status becomes Approved, and "Record disbursement" appears.
 - [ ] Record disbursement: the loan becomes Active and shows its next payment.
 
-**Reject: Joyce Ilave (Decline)**
+**Send back and reject**
+- [ ] On another submitted application, "Send back" needs a note; the application moves to "With loan officers", showing your note to the officer.
 - [ ] "Reject" asks for confirmation, and you can't confirm until a note is written.
 - [ ] After rejecting, the status is Rejected and the loan leaves the pending list.
 
 **Repayments**
 - [ ] "Due today" lists Mary Kila, Ruth Kaupa and Samuel Kiap.
 - [ ] Choosing Mary fills in K 1,318.74. Saving without a reference shows an error.
-- [ ] With a reference such as `CM8841203377`, saving shows the receipt and "Sent to 70123344", and Mary drops off the due-today list.
+- [ ] With a reference such as `CM8841203377`, saving shows the receipt and "Sent to 70123344", and Mary drops off the due-today list. The receipt stays on screen and "Print receipt (PDF)" works.
+- [ ] "Receipts recorded" lists the receipt under the form. On Mary's loan, "Kept on file" shows the receipt PDF.
 - [ ] "In arrears" lists Thomas Aisi (47 days, red), Lucy Gumuno (26) and Andrew Moka (12).
 - [ ] Entering more than is owed gives a clear error.
 
 **Borrowers and documents**
 - [ ] Borrowers lists 10 people; searching `2011 0488` finds Peter Wambi by his NID number.
+- [ ] Searching `WAMBI peter`, `kila mary` or `Joyse` (a typo) finds the right person.
+- [ ] On a profile, click a document's file name: it opens in the page with Download and Remove. Removing needs a reason, and the reason shows under "File notes". A document of a borrower with an approved loan can't be removed.
+- [ ] Upload a phone photo of an ID card as the ID, open it, and "Read ID card": the face is cropped and the card's details are shown next to what's on file. "Use as profile photo" puts it on the profile; "Update details from the card" opens the edit form filled in, saying what changed.
 - [ ] New borrower: an empty save marks what's missing; someone under 18 is refused; a phone already in use is refused.
 - [ ] On the new profile, "4 documents needed". Upload any PDF or photo as the ID: it shows under Documents on file and downloads again.
 - [ ] Joyce Ilave's application can't be approved: it lists the bank statement and payroll deduction authority as missing.
 - [ ] After approving a loan, the pay-out steps appear: the agreement (3 pages, marked DRAFT), "SMS sent to borrower", then upload a signed copy (any PDF), then record the pay-out with a reference. Pay-out isn't possible before the signed copy is uploaded.
 
-**Permissions**
-- [ ] Sign out and sign in as `officer` / `officer`. Approving a loan gives "Only a credit manager can do this."
+**Permissions: sign out and sign in as `officer` / `officer` (John Kerema, Loan officer)**
+- [ ] Applications opens on "To review" (Ruth Kaupa and Joyce Ilave). There's no Approve or Reject button anywhere.
+- [ ] On Ruth's application, "Send to credit manager" needs a written assessment. After sending, it shows "With the credit manager".
+- [ ] Joyce's application can't be recommended for approval until her documents are uploaded; a decline can be sent.
+- [ ] On an approved loan, step 4 says a credit manager pays out.
 
 ## Borrower portal: http://localhost:5173/portal
 

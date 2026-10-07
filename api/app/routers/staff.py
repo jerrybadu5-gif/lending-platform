@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from .. import pdf
 from ..deps import Services, services
 from ..domain.models import (
     ActionResult,
@@ -16,15 +17,19 @@ from ..domain.models import (
     Dashboard,
     DisburseIn,
     LoanDetail,
+    LoanReview,
     LoanSummary,
     Receipt,
     RejectIn,
     RepaymentIn,
+    ReturnIn,
     StaffUser,
+    SubmitIn,
 )
 from ..security import STAFF_COOKIE, StaffSession, end_session, staff_session, start_session
 from ..underwriting import assess_loan
 from .borrowers import borrower_kyc
+from .documents import company_of
 from .payout import PAYOUT_PENDING_MARK, add_note_safely, notify_approved, payout_status
 
 log = logging.getLogger("mclender.staff")
@@ -38,9 +43,33 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+def is_approver(s: StaffSession) -> bool:
+    return bool(APPROVER_ROLES & {r.lower() for r in s.roles})
+
+
 def _require_approver(s: StaffSession) -> None:
-    if not APPROVER_ROLES & {r.lower() for r in s.roles}:
+    if not is_approver(s):
         raise HTTPException(403, "Only a credit manager can do this.")
+
+
+REVIEW_NOT_SET_UP = (
+    "Sending applications for approval isn't set up in Fineract yet (data table dt_loan_review). "
+    "Ask your administrator to run underwriting/bootstrap.py and give staff roles access to it."
+)
+
+
+def _require_submitted(svc: Services, loan: LoanDetail, s: StaffSession | None = None) -> None:
+    if not svc.settings.review_required or loan.state != "PENDING":
+        return
+    if loan.review is None:
+        raise HTTPException(503, REVIEW_NOT_SET_UP)
+    if loan.review.stage != "SUBMITTED":
+        raise HTTPException(409, "The loan officer hasn't sent this application for approval yet.")
+    # Four eyes: whoever sent it up doesn't also approve it.
+    if s and not svc.settings.allow_self_approval and loan.review.submitted_user == s.username:
+        raise HTTPException(
+            409, "You sent this application for approval yourself, so another credit manager must decide it."
+        )
 
 
 @router.post("/login", response_model=StaffUser)
@@ -111,7 +140,8 @@ async def approve(
     loan_id: int, body: ApproveIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
     _require_approver(s)
-    await _require_kyc(svc, s.cred, loan_id)
+    loan = await _require_kyc(svc, s.cred, loan_id)
+    _require_submitted(svc, loan, s)
     result = await svc.backend.approve(s.cred, loan_id, body, svc.today())
     if result.state == "APPROVED":  # not while a second approver still has to confirm (maker-checker)
         try:
@@ -141,6 +171,7 @@ async def reject(
     loan_id: int, body: RejectIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
     _require_approver(s)
+    _require_submitted(svc, await svc.backend.get_loan(s.cred, loan_id, svc.today()))
     result = await svc.backend.reject(s.cred, loan_id, body, svc.today())
     if result.state != "REJECTED":  # waiting for a second approver (maker-checker): tell no one yet
         return result
@@ -152,6 +183,71 @@ async def reject(
             "at this time. Call us if you have questions.",
         )
     return result
+
+
+@router.post("/loans/{loan_id}/submit", response_model=LoanDetail)
+async def submit(
+    loan_id: int, body: SubmitIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
+):
+    """The loan officer's part: documents checked, assessment done, recommendation written. Sends it to the
+    credit manager's queue."""
+    # Documents must be complete to recommend approval; a decline can go up without them.
+    if body.recommendation == "APPROVE":
+        loan = await _require_kyc(svc, s.cred, loan_id)
+    else:
+        loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    if loan.state != "PENDING":
+        raise HTTPException(409, "Only an application waiting for a decision can be sent for approval.")
+    prior = loan.review
+    if prior is None:
+        raise HTTPException(503, REVIEW_NOT_SET_UP)
+    if prior.stage == "SUBMITTED":
+        raise HTTPException(409, "This application is already with the credit manager.")
+    if loan.assessment is None:
+        loan = await _assess(loan_id, s.cred, svc)
+    if body.recommendation == "APPROVE" and body.amount is not None and body.amount > loan.principal:
+        raise HTTPException(422, "The recommended amount can't be more than the borrower applied for.")
+    today = svc.today()
+    review = LoanReview(
+        stage="SUBMITTED",
+        officer_recommendation=body.recommendation,
+        officer_amount=(body.amount or loan.principal) if body.recommendation == "APPROVE" else None,
+        officer_note=body.note.strip(),
+        submitted_by=s.display_name,
+        submitted_user=s.username,
+        submitted_on=today,
+        # Keep the manager's last reply so it's clear what was asked for, until a decision is made.
+        returned_note=prior.returned_note,
+        returned_by=prior.returned_by,
+        returned_on=prior.returned_on,
+    )
+    await svc.backend.save_review(s.cred, loan_id, review)
+    advice = (
+        f"recommends approving K {review.officer_amount:,.2f}"
+        if body.recommendation == "APPROVE"
+        else "recommends declining"
+    )
+    await add_note_safely(svc, s.cred, loan_id, f"Sent for approval: {advice}. {review.officer_note}")
+    return await svc.backend.get_loan(s.cred, loan_id, today)
+
+
+@router.post("/loans/{loan_id}/return", response_model=LoanDetail)
+async def send_back(
+    loan_id: int, body: ReturnIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
+):
+    """The credit manager sends an application back to the officer with what's missing."""
+    _require_approver(s)
+    loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    if loan.state != "PENDING" or not loan.review or loan.review.stage != "SUBMITTED":
+        raise HTTPException(409, "Only an application sent for approval can be sent back.")
+    today = svc.today()
+    note = body.note.strip()
+    review = loan.review.model_copy(
+        update={"stage": "RETURNED", "returned_note": note, "returned_by": s.display_name, "returned_on": today}
+    )
+    await svc.backend.save_review(s.cred, loan_id, review)
+    await add_note_safely(svc, s.cred, loan_id, f"Sent back to the loan officer: {note}")
+    return await svc.backend.get_loan(s.cred, loan_id, today)
 
 
 @router.post("/loans/{loan_id}/disburse", response_model=ActionResult)
@@ -204,4 +300,26 @@ async def repayment(
             f"for loan {receipt.ref} on {receipt.received_on:%d/%m/%Y}. "
             f"Receipt {receipt.receipt_no}. Thank you.",
         )
+    receipt.filed = await _file_receipt(svc, s.cred, receipt)
     return receipt
+
+
+async def _file_receipt(svc: Services, cred: str, receipt: Receipt) -> bool:
+    """Keep a PDF copy of the receipt on the loan, so it can be found and printed again later. Best effort:
+    the repayment is recorded whatever happens here."""
+    if receipt.payment_id is None:
+        return False
+    try:
+        today = svc.today()
+        loan = await svc.backend.get_loan(cred, receipt.loan_id, today)
+        payment = next((p for p in loan.payments if p.id == receipt.payment_id), None)
+        if payment is None:
+            return False
+        data = pdf.receipt(loan, payment, company_of(svc), today)
+        await svc.backend.add_loan_document(
+            cred, receipt.loan_id, "receipt", f"{receipt.receipt_no}.pdf", "application/pdf", data, today
+        )
+        return True
+    except Exception:
+        log.exception("Could not file receipt %s on loan %s", receipt.receipt_no, receipt.loan_id)
+        return False

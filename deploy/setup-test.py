@@ -1,7 +1,7 @@
 """
 Sets up a fresh Fineract for a McLender test run, in one go:
 
-  1. the two McLender data tables (underwriting/bootstrap.py)
+  1. the McLender data tables (underwriting/bootstrap.py)
   2. PGK as the currency, and the payment types Cash, Bank Transfer, Mobile Money, Payroll Deduction
   3. a "Personal loan" product (PGK, 24% a year, reducing balance, monthly, 3-36 months)
   4. roles Credit Manager, Loan Officer and Borrower Portal, with only the permissions each needs
@@ -43,8 +43,12 @@ PAYMENT_TYPES = [("Cash", True), ("Bank Transfer", False), ("Mobile Money", Fals
 DT = [bootstrap.BORROWER_TABLE, bootstrap.ASSESSMENT_TABLE]
 DT_RW = [f"{op}_{t}" for t in DT for op in ("READ", "CREATE", "UPDATE")]
 # Staff also keep the borrower profile (bank account, next of kin) and KYC documents. The portal does not.
-STAFF_KYC = [f"{op}_{bootstrap.PROFILE_TABLE}" for op in ("READ", "CREATE", "UPDATE")] + [
-    "CREATE_DOCUMENT", "READ_DOCUMENT", "CREATE_CLIENTIDENTIFIER", "UPDATE_CLIENTIDENTIFIER", "CREATE_LOANNOTE",
+# Staff also keep the officer's review of each application (dt_loan_review), remove wrong uploads (with a
+# note saying why) and set the borrower's photo from their ID card.
+STAFF_TABLES = (bootstrap.PROFILE_TABLE, bootstrap.REVIEW_TABLE)
+STAFF_KYC = [f"{op}_{t}" for t in STAFF_TABLES for op in ("READ", "CREATE", "UPDATE")] + [
+    "CREATE_DOCUMENT", "READ_DOCUMENT", "DELETE_DOCUMENT", "CREATE_CLIENTIDENTIFIER", "UPDATE_CLIENTIDENTIFIER",
+    "CREATE_LOANNOTE", "CREATE_CLIENTNOTE", "CREATE_CLIENTIMAGE", "DELETE_CLIENTIMAGE",
 ]
 ROLES = {
     "Credit Manager": (

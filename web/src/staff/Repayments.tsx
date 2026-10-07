@@ -21,11 +21,14 @@ export function Repayments() {
   const all = useQuery({ queryKey: ['collections', 'all'], queryFn: () => api.staff.collections('all') })
   const asOf = useQuery({ queryKey: ['dashboard'], queryFn: api.staff.dashboard }).data?.as_of
   const [picked, setPicked] = useState<CollectionItem | null>(null)
+  // Receipts recorded on this screen, newest first, so each one can still be printed after moving on.
+  const [recorded, setRecorded] = useState<Receipt[]>([])
+  const [round, setRound] = useState(0) // a new round starts an empty form, even for the same loan
   const fromLink = params.get('loan') ? Number(params.get('loan')) : null
   const rows = q.data ?? []
   // Keep the picked loan even after it drops off the list (just paid), so its receipt stays on screen.
   const sel = picked ?? (all.data ?? []).find((c) => c.loan_id === fromLink) ?? rows[0]
-  const setSelected = (loanId: number) => setPicked((all.data ?? []).find((c) => c.loan_id === loanId) ?? null)
+  const setSelected = (loanId: number) => { setPicked((all.data ?? []).find((c) => c.loan_id === loanId) ?? null); setRound((n) => n + 1) }
   const counts = { today: all.data?.filter((c) => c.days_overdue === 0).length, arrears: all.data?.filter((c) => c.days_overdue > 0).length, all: all.data?.length }
 
   return (
@@ -55,14 +58,33 @@ export function Repayments() {
           )}
         </section>
         <section className="ml-card flex flex-col gap-4" aria-label="Record repayment" style={{ flex: '2 1 360px', minWidth: 0 }}>
-          {sel && asOf ? <RecordForm key={sel.loan_id} item={sel} today={asOf} /> : <p className="m-0 text-ink-muted">Choose a loan on the left to record a payment.</p>}
+          {sel && asOf
+            ? <RecordForm key={`${sel.loan_id}-${round}`} item={sel} today={asOf}
+                onSaved={(r) => { setPicked(sel); setRecorded((list) => [r, ...list]) }}
+                onNext={() => { setPicked(null); setRound((n) => n + 1) }} />
+            : <p className="m-0 text-ink-muted">Choose a loan on the left to record a payment.</p>}
         </section>
       </div>
+      {recorded.length > 0 && (
+        <section className="ml-card flex flex-col gap-3" aria-label="Receipts recorded">
+          <h2 className="ml-h2">Receipts recorded</h2>
+          <p className="m-0 text-[13px] text-ink-muted">Each receipt can also be printed again from its loan.</p>
+          <ul className="m-0 p-0 list-none flex flex-col">
+            {recorded.map((r) => (
+              <li key={r.receipt_no} className="flex flex-wrap justify-between items-center gap-3 py-2 border-t border-line text-[13px]">
+                <span><span className="ml-ref">{r.receipt_no}</span> · {r.borrower_name} · <strong>{formatKina(r.amount)}</strong> · {METHODS.find((x) => x.id === r.method)?.label}</span>
+                {r.payment_id != null && <DownloadLink href={files.receipt(r.loan_id, r.payment_id)}>Print receipt</DownloadLink>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </>
   )
 }
 
-function RecordForm({ item, today }: { item: CollectionItem; today: string }) {
+function RecordForm({ item, today, onSaved, onNext }:
+  { item: CollectionItem; today: string; onSaved: (r: Receipt) => void; onNext: () => void }) {
   const qc = useQueryClient()
   const [method, setMethod] = useState<PaymentMethod>('mobile')
   const [amount, setAmount] = useState(formatKina(item.amount_due, { currency: false }))
@@ -74,6 +96,7 @@ function RecordForm({ item, today }: { item: CollectionItem; today: string }) {
     mutationFn: () => api.staff.repay(item.loan_id, { amount: parseKina(amount) ?? '', method, reference: reference.trim(), received_on: date }),
     onSuccess: (r) => {
       setReceipt(r)
+      onSaved(r)
       qc.invalidateQueries({ queryKey: ['collections'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['loan', item.loan_id] })
@@ -103,8 +126,12 @@ function RecordForm({ item, today }: { item: CollectionItem; today: string }) {
           <dt className="text-ink-muted">SMS receipt</dt><dd className="m-0">{receipt.sms_sent_to ? `Sent to ${receipt.sms_sent_to}` : 'No phone on file'}</dd>
         </dl>
         {receipt.payment_id != null && (
-          <DownloadLink href={files.receipt(receipt.loan_id, receipt.payment_id)} className="ml-btn ml-btn-sm self-start no-underline">Print receipt (PDF)</DownloadLink>
+          <DownloadLink href={files.receipt(receipt.loan_id, receipt.payment_id)} className="ml-btn ml-btn-primary ml-btn-sm self-start no-underline">Print receipt (PDF)</DownloadLink>
         )}
+        {receipt.filed
+          ? <span className="text-[13px] text-ink-muted">A copy is filed on the loan as {receipt.receipt_no}.pdf.</span>
+          : <span className="text-[13px] text-warning">The PDF copy couldn't be filed on the loan. Print it now; it can be printed again from the loan.</span>}
+        <Button size="sm" variant="quiet" className="self-start" onClick={onNext}>Record another payment</Button>
       </div>
     )
   }

@@ -17,6 +17,7 @@ from fineract import Fineract, FineractError
 BORROWER_TABLE = "dt_borrower_financials"
 PROFILE_TABLE = "dt_borrower_profile"
 ASSESSMENT_TABLE = "dt_loan_assessment"
+REVIEW_TABLE = "dt_loan_review"
 LOAN_APPROVE_STATUS = 200  # Fineract StatusEnum.APPROVE for entity m_loan
 
 TABLES = [
@@ -68,6 +69,24 @@ TABLES = [
             {"name": "policy_version", "type": "string", "length": 20, "mandatory": True},
             {"name": "assessed_on", "type": "date", "mandatory": True},
             {"name": "notes", "type": "text", "mandatory": False},
+        ],
+    },
+    {
+        # The loan officer's review (DRAFT -> SUBMITTED) and the credit manager's reply if sent back (RETURNED).
+        "datatableName": REVIEW_TABLE,
+        "apptableName": "m_loan",
+        "multiRow": False,
+        "columns": [
+            {"name": "stage", "type": "string", "length": 12, "mandatory": True},
+            {"name": "officer_recommendation", "type": "string", "length": 10, "mandatory": False},
+            {"name": "officer_amount", "type": "decimal", "mandatory": False},
+            {"name": "officer_note", "type": "text", "mandatory": False},
+            {"name": "submitted_by", "type": "string", "length": 100, "mandatory": False},
+            {"name": "submitted_user", "type": "string", "length": 100, "mandatory": False},
+            {"name": "submitted_on", "type": "date", "mandatory": False},
+            {"name": "returned_note", "type": "text", "mandatory": False},
+            {"name": "returned_by", "type": "string", "length": 100, "mandatory": False},
+            {"name": "returned_on", "type": "date", "mandatory": False},
         ],
     },
 ]

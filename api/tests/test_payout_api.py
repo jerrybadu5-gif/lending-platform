@@ -157,3 +157,31 @@ def test_loan_officer_can_log_contact_and_upload_signed_copy(client, staff):
 def test_signed_agreement_cannot_be_filed_on_the_borrower(staff):
     r = staff.post("/api/staff/borrowers/8/documents", data={"kind": "signed_agreement"}, files=SIGNED)
     assert r.status_code == 422
+
+
+def test_wrong_signed_agreement_can_be_removed_before_payout(staff):
+    approve_peter(staff)
+    up = staff.post("/api/staff/loans/536/signed-agreement", files=SIGNED).json()
+    url = f"/api/staff/loans/536/documents/{up['id']}/remove"
+    assert staff.post(url, json={}).status_code == 422
+    assert staff.post(url, json={"reason": "Page 2 missing"}).status_code == 204
+    p = staff.get("/api/staff/loans/536/payout").json()
+    assert p["signed_agreement"] is None and p["ready"] is False
+    history = staff.get("/api/staff/loans/536").json()["history"]
+    assert any(h["text"].endswith("Reason: Page 2 missing") for h in history)
+
+
+def test_signed_agreement_stays_once_payout_is_waiting_for_a_checker(staff):
+    approve_peter(staff)
+    up = staff.post("/api/staff/loans/536/signed-agreement", files=SIGNED).json()
+    backend = staff.app.state.services.backend
+    from datetime import date
+
+    from app.routers.payout import PAYOUT_PENDING_MARK
+
+    run_note = backend.add_loan_note("demo:demo", 536, f"{PAYOUT_PENDING_MARK}: TT-1", date.today())
+    import asyncio
+
+    asyncio.run(run_note)
+    r = staff.post(f"/api/staff/loans/536/documents/{up['id']}/remove", json={"reason": "wrong"})
+    assert r.status_code == 409

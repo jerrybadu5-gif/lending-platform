@@ -119,6 +119,20 @@ def test_get_loan_maps_everything(fb):
         ],
     )
     respx.get(f"{BASE}/datatables/dt_loan_assessment/536").respond(200, json=[])
+    respx.get(f"{BASE}/datatables/dt_loan_review").respond(200, json={"registeredTableName": "dt_loan_review"})
+    respx.get(f"{BASE}/datatables/dt_loan_review/536").respond(
+        200,
+        json=[
+            {
+                "stage": "SUBMITTED",
+                "officer_recommendation": "APPROVE",
+                "officer_amount": 13000,
+                "officer_note": "Checked",
+                "submitted_by": "John Kerema",
+                "submitted_on": [2026, 10, 5],
+            }
+        ],
+    )
     respx.get(f"{BASE}/loans/536/notes").respond(
         200, json=[{"note": "Phoned borrower: coming Friday", "createdByUsername": "grace", "createdOn": [2026, 10, 5]}]
     )
@@ -145,6 +159,8 @@ def test_get_loan_maps_everything(fb):
     assert d.ref == "LN-000000536" and d.state == "PENDING" and d.borrower.phone == "71234567"
     assert d.borrower.monthly_income == D("4000") and d.borrower.credit_score == 700
     assert d.schedule[0].total == D("1418.39") and d.assessment is None
+    assert d.review_stage == "SUBMITTED" and d.review and d.review.officer_amount == D("13000")
+    assert d.review.submitted_on == date(2026, 10, 5) and d.review.submitted_by == "John Kerema"
     assert d.history[-1].text == "Application submitted"  # newest first; notes merged in by date
     assert d.history[0].text == "Phoned borrower: coming Friday" and d.history[0].who == "grace"
 
@@ -333,30 +349,44 @@ def test_documents_upload_list_download(fb):
     assert data == b"%PDF-1.4" and meta.file_name == "slip.pdf"
 
 
+CLIENTS = {
+    "totalFilteredRecords": 3,
+    "pageItems": [
+        {"id": 1, "displayName": "Mary Kila", "mobileNo": "70123344"},
+        {"id": 8, "displayName": "Peter Wambi", "mobileNo": "71234567"},
+        {"id": 9, "displayName": "Kila Morea", "mobileNo": "75551212"},
+    ],
+}
+
+
 @respx.mock
-def test_search_merges_client_and_identifier_hits(fb):
-    respx.get(f"{BASE}/search").respond(
+def test_search_ignores_case_and_word_order(fb):
+    listing = respx.get(f"{BASE}/clients").respond(200, json=CLIENTS)
+    respx.get(f"{BASE}/search").respond(403, json={"defaultUserMessage": "no"})  # an NID search failing is fine
+    assert [h.name for h in run(fb.search_borrowers("K", "WAMBI"))] == ["Peter Wambi"]
+    assert [h.name for h in run(fb.search_borrowers("K", "kila mary"))] == ["Mary Kila"]
+    assert [h.name for h in run(fb.search_borrowers("K", "kila"))] == ["Kila Morea", "Mary Kila"]
+    assert [h.name for h in run(fb.search_borrowers("K", "Petr"))] == ["Peter Wambi"]  # a typo
+    assert [h.name for h in run(fb.search_borrowers("K", "7012 3344"))] == ["Mary Kila"]
+    assert listing.call_count == 1  # the client list is kept for a minute
+
+
+@respx.mock
+def test_search_finds_nid_however_it_is_typed(fb):
+    respx.get(f"{BASE}/clients").respond(200, json=CLIENTS)
+    nid = respx.get(f"{BASE}/search").respond(
         200,
         json=[
-            {"entityId": 8, "entityType": "CLIENT", "entityName": "Peter Wambi", "entityMobileNo": "71234567"},
-            {
-                "entityId": 3,
-                "entityType": "CLIENTIDENTIFIER",
-                "entityName": "2011 0488 7712",
-                "parentId": 8,
-                "parentName": "Peter Wambi",
-            },
-            {
-                "entityId": 4,
-                "entityType": "CLIENTIDENTIFIER",
-                "entityName": "2009 1182",
-                "parentId": 1,
-                "parentName": "Mary Kila",
-            },
+            {"entityType": "CLIENTIDENTIFIER", "entityName": "2011 0488 7712", "parentId": 8, "parentName": "PW"},
+            {"entityType": "CLIENTIDENTIFIER", "entityName": "2009 7712", "parentId": 1, "parentName": "MK"},
         ],
     )
-    hits = run(fb.search_borrowers("K", "wambi"))
-    assert [(h.id, h.name) for h in hits] == [(8, "Peter Wambi"), (1, "Mary Kila")]
+    hits = run(fb.search_borrowers("K", "2011-0488-7712"))
+    assert [(h.id, h.national_id) for h in hits] == [(8, "2011 0488 7712")]
+    # A name and part of an NID must both match the same person.
+    assert [h.name for h in run(fb.search_borrowers("K", "mary 7712"))] == ["Mary Kila"]
+    assert run(fb.search_borrowers("K", "wambi 9999")) == []
+    assert nid.calls[0].request.url.params["query"] == "2011"
 
 
 @respx.mock
@@ -527,3 +557,74 @@ def test_portal_user_refused_is_not_shown_as_a_sign_in_problem(fb, caplog):
     with pytest.raises(BackendError) as e:
         run(fb._get("STAFFKEY", "/loans/1"))
     assert e.value.status == 401  # staff are asked to sign in again
+
+
+@respx.mock
+def test_remove_documents_and_client_notes(fb):
+    d1 = respx.delete(f"{BASE}/clients/8/documents/5").respond(200, json={"resourceId": 5})
+    d2 = respx.delete(f"{BASE}/loans/536/documents/6").respond(200, json={"resourceId": 6})
+    run(fb.delete_document("K", 8, 5))
+    run(fb.delete_loan_document("K", 536, 6))
+    assert d1.called and d2.called
+    note = respx.post(f"{BASE}/clients/8/notes").respond(200, json={"resourceId": 3})
+    run(fb.add_client_note("K", 8, "Removed payslip", TODAY))
+    assert json.loads(note.calls[0].request.content) == {"note": "Removed payslip"}
+    respx.get(f"{BASE}/clients/8/notes").respond(
+        200,
+        json=[
+            {"id": 1, "note": "older", "createdOn": "2026-10-01T01:00:00Z", "createdByUsername": "jk"},
+            {"id": 2, "note": "newer", "createdOn": "2026-10-05T23:30:00Z", "createdByUsername": "gp"},
+        ],
+    )
+    notes = run(fb.client_notes("K", 8))
+    assert [(n.text, n.when, n.who) for n in notes] == [("newer", "2026-10-06", "gp"), ("older", "2026-10-01", "jk")]
+
+
+@respx.mock
+def test_save_review_creates_then_updates_the_row(fb):
+    from app.domain.models import LoanReview
+
+    respx.get(f"{BASE}/datatables/dt_loan_review/536").respond(200, json=[])
+    created = respx.post(f"{BASE}/datatables/dt_loan_review/536").respond(200, json={"resourceId": 536})
+    review = LoanReview(
+        stage="SUBMITTED",
+        officer_recommendation="APPROVE",
+        officer_amount=D("13000"),
+        officer_note="ok",
+        submitted_by="John Kerema",
+        submitted_on=TODAY,
+    )
+    run(fb.save_review("K", 536, review))
+    body = json.loads(created.calls[0].request.content)
+    assert body["stage"] == "SUBMITTED" and body["officer_amount"] == "13000" and body["submitted_on"] == "2026-10-06"
+    assert body["returned_note"] is None and body["dateFormat"] == "yyyy-MM-dd"
+
+
+@respx.mock
+def test_missing_review_table_is_not_mistaken_for_not_reviewed(fb):
+    table = respx.get(f"{BASE}/datatables/dt_loan_review")
+    table.respond(404, json={"defaultUserMessage": "Datatable not found."})
+    assert run(fb._review("K", 536)) is None
+    table.respond(200, json={})
+    fb._invalidate()
+    respx.get(f"{BASE}/datatables/dt_loan_review/536").respond(200, json=[])
+    assert run(fb._review("K", 536)).stage == "DRAFT"  # the table is there, with no row yet
+
+
+@respx.mock
+def test_client_photo_is_saved_and_read_back(fb):
+    up = respx.post(f"{BASE}/clients/8/images").respond(200, json={"resourceId": 8})
+    run(fb.set_photo("K", 8, b"\xff\xd8\xffjpeg"))
+    assert b'filename="photo.jpg"' in up.calls[0].request.content
+    import base64
+
+    respx.get(f"{BASE}/clients/8/images").respond(
+        200, content=b"data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xffjpeg")
+    )
+    assert run(fb.get_photo("K", 8)) == b"\xff\xd8\xffjpeg"
+
+
+@respx.mock
+def test_no_client_photo(fb):
+    respx.get(f"{BASE}/clients/8/images").respond(404, json={})
+    assert run(fb.get_photo("K", 8)) is None

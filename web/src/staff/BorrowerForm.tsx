@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, ApiError, type Borrower, type BorrowerIn, type Gender } from '../api/client'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { api, ApiError, type Borrower, type BorrowerIn, type Gender, type IdScan } from '../api/client'
 import { Button, ErrorNote, Field, Skeleton } from '../components'
 import { formatKina, parseKina } from '../lib/format'
 
@@ -95,15 +95,37 @@ export function NewBorrower() {
   return <BorrowerForm initial={EMPTY} />
 }
 
+/** Details read from the ID card replace what's on file only where the card had a value. */
+export function withCard(form: Form, card: IdScan['suggestions'] | undefined): { form: Form; changed: (keyof Form)[] } {
+  if (!card) return { form, changed: [] }
+  const next = { ...form }
+  const changed: (keyof Form)[] = []
+  const put = (k: keyof Form, v: string | null | undefined) => {
+    if (v && v !== form[k]) { (next[k] as string) = v; changed.push(k) }
+  }
+  put('first_name', card.first_name)
+  put('last_name', card.last_name)
+  put('national_id', card.national_id)
+  put('date_of_birth', card.date_of_birth)
+  put('gender', card.gender)
+  return { form: next, changed }
+}
+
+const CARD_LABELS: Partial<Record<keyof Form, string>> = {
+  first_name: 'first name', last_name: 'last name', national_id: 'NID number', date_of_birth: 'date of birth', gender: 'gender',
+}
+
 export function EditBorrower() {
   const id = Number(useParams().id)
+  const card = (useLocation().state as { fromCard?: IdScan['suggestions'] } | null)?.fromCard
   const q = useQuery({ queryKey: ['borrower', id], queryFn: () => api.staff.borrower(id) })
   if (q.error) return <ErrorNote error={q.error} retry={() => q.refetch()} />
   if (!q.data) return <Skeleton h={400} />
-  return <BorrowerForm id={id} initial={fromBorrower(q.data.borrower)} />
+  const { form, changed } = withCard(fromBorrower(q.data.borrower), card)
+  return <BorrowerForm id={id} initial={form} fromCard={changed} />
 }
 
-function BorrowerForm({ id, initial }: { id?: number; initial: Form }) {
+function BorrowerForm({ id, initial, fromCard = [] }: { id?: number; initial: Form; fromCard?: (keyof Form)[] }) {
   const [f, setF] = useState<Form>(initial)
   const [touched, setTouched] = useState(false)
   const qc = useQueryClient()
@@ -137,6 +159,11 @@ function BorrowerForm({ id, initial }: { id?: number; initial: Form }) {
     <form onSubmit={submit} noValidate className="flex flex-col gap-6" style={{ maxWidth: 820 }}>
       <div className="text-[13px] text-ink-muted"><Link to="/staff/borrowers">Borrowers</Link> / {id ? 'Edit' : 'New borrower'}</div>
       <h1 className="ml-title">{id ? `Edit ${initial.first_name} ${initial.last_name}` : 'New borrower'}</h1>
+      {fromCard.length > 0 && (
+        <div className="ml-alert ml-alert-warning" role="note">
+          Filled in from the ID card: {fromCard.map((k) => CARD_LABELS[k]).join(', ')}. Check each one against the card before you save.
+        </div>
+      )}
 
       <Section title="Personal details">
         <Field label="First name" autoComplete="off" value={f.first_name} onChange={set('first_name')} error={err('first_name')} />

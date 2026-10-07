@@ -1,6 +1,14 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 const PDF = { name: 'scan.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n% e2e\n%%EOF\n') }
+
+async function signInAs(page: Page, user: string) {
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await page.getByLabel('Username').fill(user)
+  await page.getByLabel('Password').fill(user)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: 'Portfolio today' })).toBeVisible()
+}
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/staff/login')
@@ -36,13 +44,13 @@ test('sign up a borrower, upload KYC documents, take an application and approve 
   await expect(page.getByText('4 documents needed')).toBeVisible()
   await page.getByTestId('upload-id').setInputFiles(PDF)
   await expect(page.getByText('3 documents needed')).toBeVisible()
-  await expect(page.getByRole('link', { name: 'scan.pdf' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'scan.pdf' })).toBeVisible()
 
   await page.getByLabel('Amount (PGK)').fill('3000')
   await page.getByRole('button', { name: 'Save application' }).click()
   await expect(page.getByRole('heading', { name: 'Kila Morea' })).toBeVisible()
-  await expect(page.getByText('Documents still needed before approval')).toBeVisible()
-  await expect(page.getByRole('button', { name: /^Approve/ })).toBeDisabled()
+  await expect(page.getByText('Documents still needed', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send to credit manager' })).toBeDisabled()
 
   await page.getByRole('link', { name: "Upload them on the borrower's profile" }).click()
   for (const kind of ['payslip', 'bank_statement', 'deduction_authority']) {
@@ -50,6 +58,15 @@ test('sign up a borrower, upload KYC documents, take an application and approve 
   }
   await expect(page.getByText('Documents complete')).toBeVisible()
   await page.getByRole('link', { name: /^LN-/ }).first().click()
+  // The loan officer sends it up; a credit manager can't approve what they sent themselves.
+  const loanUrl = page.url()
+  await signInAs(page, 'officer')
+  await page.goto(loanUrl)
+  await page.getByLabel('Your assessment').fill('All four documents checked against the originals.')
+  await page.getByRole('button', { name: 'Send to credit manager' }).click()
+  await expect(page.getByRole('heading', { name: 'With the credit manager' })).toBeVisible()
+  await signInAs(page, 'demo')
+  await page.goto(loanUrl)
   await expect(page.getByRole('button', { name: /^Approve/ })).toBeEnabled()
   await page.getByRole('button', { name: /^Approve/ }).click()
   await expect(page.getByRole('status')).toContainText('approved')
@@ -65,4 +82,28 @@ test('find a borrower by NID number', async ({ page }) => {
   await page.getByLabel('Find a borrower').fill('2011 0488')
   await expect(page.getByRole('cell', { name: 'Peter Wambi' })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'Mary Kila' })).toHaveCount(0)
+})
+
+
+test('open a document, then remove a wrong upload with a reason', async ({ page }) => {
+  await page.goto('/staff/borrowers/10')  // Joyce Ilave: no loan approved yet
+  await page.getByTestId('upload-other').setInputFiles({ ...PDF, name: 'wrong-person.pdf' })
+  await page.getByRole('button', { name: 'wrong-person.pdf' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('link', { name: 'Download' })).toBeVisible()
+  await expect(dialog.locator('iframe')).toBeVisible()
+  await dialog.getByRole('button', { name: 'Remove…' }).click()
+  await dialog.getByRole('button', { name: 'Remove document' }).click()
+  await expect(dialog.getByText('Say why it is being removed, for the record.')).toBeVisible()
+  await dialog.getByLabel('Why remove it?').fill('Another borrower’s payslip')
+  await dialog.getByRole('button', { name: 'Remove document' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'wrong-person.pdf' })).toHaveCount(0)
+  await expect(page.getByText(/Removed Other document: wrong-person.pdf. Reason: Another borrower’s payslip/)).toBeVisible()
+})
+
+test('search ignores case and word order', async ({ page }) => {
+  await page.goto('/staff/borrowers')
+  await page.getByLabel('Find a borrower').fill('WAMBI peter')
+  await expect(page.getByRole('cell', { name: 'Peter Wambi' })).toBeVisible()
 })

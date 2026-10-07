@@ -10,9 +10,11 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from functools import cache
 from typing import cast
 
 from ..domain.models import (
+    DOCUMENT_LABELS,
     ActionResult,
     ApplicationIn,
     ApproveIn,
@@ -31,9 +33,11 @@ from ..domain.models import (
     InterestMethod,
     LoanDetail,
     LoanEvent,
+    LoanReview,
     LoanState,
     LoanSummary,
     NextOfKin,
+    OfficerAdvice,
     Payment,
     PortalApplicationIn,
     Receipt,
@@ -43,6 +47,7 @@ from ..domain.models import (
 )
 from ..domain.risk import DECLINING_BALANCE, FLAT
 from ..domain.schedule import Row, add_months, monthly_schedule
+from ..domain.search import match_score, rank
 from .base import AuthFailed, BackendError, NotFound, normalise_phone
 
 ZERO = Decimal("0")
@@ -66,7 +71,28 @@ PRODUCTS = {
 _pay_ids = itertools.count(9001)
 
 # Smallest valid-looking PDF, standing in for scanned KYC documents in the sample data.
-SAMPLE_PDF = b"%PDF-1.4\n% McLender sample document\n%%EOF\n"
+
+
+@cache
+def sample_pdf(title: str, name: str) -> bytes:
+    """A one-page stand-in for a scanned document, so previews in the demo show something real."""
+    import io
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(60, h - 90, title)
+    c.setFont("Helvetica", 12)
+    c.drawString(60, h - 120, name)
+    c.drawString(60, h - 140, "Sample document for the McLender demo. Not a real record.")
+    c.rect(50, h - 400, w - 100, 230)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
 
 
 @dataclass
@@ -92,6 +118,7 @@ class DemoLoan:
     approved_on: date | None = None
     payments: list[Pay] = field(default_factory=list)
     assessment: Assessment | None = None
+    review: LoanReview = field(default_factory=LoanReview)
     history: list[LoanEvent] = field(default_factory=list)
 
     @property
@@ -114,11 +141,12 @@ class DemoLoan:
 class DemoBackend:
     def __init__(self, today: date):
         self._ids = itertools.count(549)
-        self._receipts = itertools.count(419)
         self.borrowers: dict[int, Borrower] = {}
         self.loans: dict[int, DemoLoan] = {}
         self.documents: dict[int, list[tuple[BorrowerDocument, bytes]]] = {}
         self.loan_documents: dict[int, list[tuple[BorrowerDocument, bytes]]] = {}
+        self.client_note_log: dict[int, list[LoanEvent]] = {}
+        self.photos: dict[int, bytes] = {}
         self._borrower_ids = itertools.count(11)
         self._doc_ids = itertools.count(1)
         self._seed(today)
@@ -231,10 +259,6 @@ class DemoBackend:
         self.borrowers[8].next_of_kin = NextOfKin(name="Rose Wambi", relationship="Wife", phone="71440023")
         # KYC files: everyone complete except Joyce Ilave, who still needs a bank statement and a
         # signed payroll deduction authority.
-        for i in self.borrowers:
-            kinds = ["id", "payslip"] if i == 10 else ["id", "payslip", "bank_statement", "deduction_authority"]
-            for kind in kinds:
-                self._store_document(i, kind, f"{kind}.pdf", "application/pdf", SAMPLE_PDF, t - timedelta(days=20))
 
         def active(id_: int, bid: int, product: str, principal: str, months: int, paid: int, first_unpaid_due: date):
             first_due = add_months(first_unpaid_due, -paid)
@@ -277,6 +301,40 @@ class DemoBackend:
         pending(538, 3, "advance", "1200", 2, 1)
         pending(541, 9, "business", "30000", 24, 3)
         pending(542, 10, "personal", "6500", 6, 0)
+        # The loan officer has reviewed three and sent them to the credit manager; two are still with him.
+        for id_, advice, note in [
+            (533, "APPROVE", "Payslips and bank statement agree. Employer confirmed by phone."),
+            (536, "APPROVE", "Long-serving police officer, clean repayment history with us. Suggest K 13,000."),
+            (541, "APPROVE", "Business accounts checked at the shop; stock and takings look steady."),
+        ]:
+            loan = self.loans[id_]
+            loan.review = LoanReview(
+                stage="SUBMITTED",
+                officer_recommendation=cast(OfficerAdvice, advice),
+                officer_amount=D("13000") if id_ == 536 else loan.principal,
+                officer_note=note,
+                submitted_by="John Kerema",
+                submitted_user="officer",
+                submitted_on=loan.submitted_on,
+            )
+            loan.history.append(
+                LoanEvent(when=loan.submitted_on.isoformat(), text=f"Sent for approval. {note}", who="John Kerema")
+            )
+
+        # Files were collected before each borrower's first application.
+        for i in self.borrowers:
+            applied = [lo.submitted_on for lo in self.loans.values() if lo.borrower_id == i]
+            on = min([t - timedelta(days=20), *applied]) - timedelta(days=1)
+            kinds = ["id", "payslip"] if i == 10 else ["id", "payslip", "bank_statement", "deduction_authority"]
+            for kind in kinds:
+                self._store_document(
+                    i,
+                    kind,
+                    f"{kind}.pdf",
+                    "application/pdf",
+                    sample_pdf(DOCUMENT_LABELS[kind], self.borrowers[i].name),
+                    on,
+                )
 
     # ----------------------------------------------------------- derived
     def _installments(self, loan: DemoLoan, today: date) -> list[Installment]:
@@ -326,6 +384,7 @@ class DemoBackend:
             next_due_amount=(nxt.total - nxt.paid) if nxt else None,
             submitted_on=loan.submitted_on,
             recommendation=loan.assessment.recommendation if loan.assessment else None,
+            review_stage=loan.review.stage if loan.state == "PENDING" else None,
         )
 
     def _principal_outstanding(self, loan: DemoLoan, today: date) -> Decimal:
@@ -409,6 +468,7 @@ class DemoBackend:
             schedule=inst,
             total_interest=sum((i.interest for i in inst), ZERO),
             assessment=loan.assessment,
+            review=loan.review.model_copy() if loan.state == "PENDING" else None,
             history=list(reversed(loan.history)),
             payment_reference=f"BL{loan.id}",
             payments=[
@@ -422,6 +482,17 @@ class DemoBackend:
                 for p in reversed(loan.payments)
             ],
         )
+
+    async def set_photo(self, cred: str, borrower_id: int, jpeg: bytes) -> None:
+        self._borrower(borrower_id).has_photo = True
+        self.photos[borrower_id] = jpeg
+
+    async def get_photo(self, cred: str, borrower_id: int) -> bytes | None:
+        self._borrower(borrower_id)
+        return self.photos.get(borrower_id)
+
+    async def save_review(self, cred: str, loan_id: int, review: LoanReview) -> None:
+        self._loan(loan_id).review = review.model_copy()
 
     async def save_assessment(self, cred: str, loan_id: int, assessment: Assessment) -> None:
         loan = self._loan(loan_id)
@@ -549,7 +620,7 @@ class DemoBackend:
         if self._summary(loan, today).outstanding == 0:
             loan.state = "CLOSED"
         b = self.borrowers[loan.borrower_id]
-        receipt = f"RC-{today:%Y-%m}-{next(self._receipts):04d}"
+        receipt = f"RC-{pay.id}"  # same numbering as Fineract (the repayment transaction id)
         loan.history.append(
             LoanEvent(
                 when=body.received_on.isoformat(),
@@ -625,20 +696,16 @@ class DemoBackend:
         b.bank, b.next_of_kin = body.bank, body.next_of_kin
 
     async def search_borrowers(self, cred: str, query: str, limit: int = 50) -> list[BorrowerListItem]:
-        q = query.strip().lower()
-        digits = "".join(c for c in q if c.isdigit())
-        hits = [
-            b
-            for b in self.borrowers.values()
-            if not q
-            or q in b.name.lower()
-            or q in (b.employer or "").lower()
-            or (digits and (digits in (b.phone or "") or digits in _key(b.national_id or "")))
-        ]
-        hits.sort(key=lambda b: b.name.lower())
+        hits = rank(
+            query,
+            self.borrowers.values(),
+            lambda b: match_score(query, b.name, [b.employer], [b.phone, b.national_id]),
+            lambda b: b.name,
+            limit,
+        )
         return [
             BorrowerListItem(id=b.id, name=b.name, phone=b.phone, national_id=b.national_id, employer=b.employer)
-            for b in hits[:limit]
+            for b in hits
         ]
 
     async def get_borrower(self, cred: str, borrower_id: int) -> Borrower:
@@ -692,6 +759,27 @@ class DemoBackend:
             if doc.id == doc_id:
                 return doc, data
         raise NotFound("Document")
+
+    async def delete_document(self, cred: str, borrower_id: int, doc_id: int) -> None:
+        docs = self.documents.get(borrower_id, [])
+        if not any(d.id == doc_id for d, _ in docs):
+            raise NotFound("Document")
+        self.documents[borrower_id] = [(d, b) for d, b in docs if d.id != doc_id]
+
+    async def delete_loan_document(self, cred: str, loan_id: int, doc_id: int) -> None:
+        docs = self.loan_documents.get(loan_id, [])
+        if not any(d.id == doc_id for d, _ in docs):
+            raise NotFound("Document")
+        self.loan_documents[loan_id] = [(d, b) for d, b in docs if d.id != doc_id]
+
+    async def add_client_note(self, cred: str, borrower_id: int, text: str, today: date) -> None:
+        self._borrower(borrower_id)
+        self.client_note_log.setdefault(borrower_id, []).append(
+            LoanEvent(when=today.isoformat(), text=text, who=cred.removeprefix("demo:"))
+        )
+
+    async def client_notes(self, cred: str, borrower_id: int) -> list[LoanEvent]:
+        return list(reversed(self.client_note_log.get(borrower_id, [])))
 
     async def create_application(self, cred: str, borrower_id: int, body: ApplicationIn, today: date) -> LoanSummary:
         b = self._borrower(borrower_id)

@@ -18,6 +18,10 @@ dependencies = [
   "tzdata>=2024.1",  # time zone database; Windows has none built in
   "python-multipart>=0.0.20",  # file uploads (KYC documents)
   "reportlab>=4.2",  # PDF loan agreements, statements and receipts
+  "pillow>=10.4",  # ID card photos
+  "opencv-python-headless>=4.10",  # finds the face on an ID card
+  "pytesseract>=0.3.13",  # reads an ID card's text (needs the tesseract-ocr program, see Dockerfile)
+  "pypdfium2>=4.30",  # renders a scanned ID card PDF to an image
 ]
 
 [project.optional-dependencies]

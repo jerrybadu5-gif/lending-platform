@@ -134,6 +134,8 @@ services:
       MCL_AGREEMENT_REVIEWED: ${MCL_AGREEMENT_REVIEWED:-false}
       MCL_KYC_REQUIRED_FOR_APPROVAL: ${MCL_KYC_REQUIRED_FOR_APPROVAL:-true}
       MCL_SIGNED_AGREEMENT_REQUIRED: ${MCL_SIGNED_AGREEMENT_REQUIRED:-true}
+      MCL_REVIEW_REQUIRED: ${MCL_REVIEW_REQUIRED:-true}
+      MCL_ALLOW_SELF_APPROVAL: ${MCL_ALLOW_SELF_APPROVAL:-false}
 
   # McLender web app (staff app at /staff, borrower portal at /portal), served by Caddy
   mclender-web:

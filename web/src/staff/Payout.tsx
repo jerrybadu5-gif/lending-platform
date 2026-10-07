@@ -3,6 +3,7 @@ import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, files, type ActionResult, type LoanDetail, type PayoutMethod } from '../api/client'
 import { Button, ErrorNote, Field, Skeleton } from '../components'
 import { DownloadLink } from '../components/DownloadLink'
+import { DocumentViewer } from '../components/DocumentViewer'
 import { formatDate, formatKina } from '../lib/format'
 
 const METHODS: { id: PayoutMethod; label: string; ref: string; refHint: string }[] = [
@@ -19,9 +20,10 @@ export function usePayout(loan: LoanDetail) {
 }
 
 /** The pay-out steps for an approved loan: agreement, tell the borrower, signed copy, pay out. */
-export function PayoutSteps({ loan, onDone }: { loan: LoanDetail; onDone: (r: ActionResult) => void }) {
+export function PayoutSteps({ loan, onDone, canPayOut = true }: { loan: LoanDetail; onDone: (r: ActionResult) => void; canPayOut?: boolean }) {
   const q = usePayout(loan)
   const qc = useQueryClient()
+  const [viewing, setViewing] = useState(false)
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['payout', loan.id] })
     qc.invalidateQueries({ queryKey: ['loan', loan.id] })
@@ -51,15 +53,20 @@ export function PayoutSteps({ loan, onDone }: { loan: LoanDetail; onDone: (r: Ac
 
       <Step n={3} done={signed} title="Upload the signed agreement">
         {p.signed_agreement
-          ? <p className="m-0 text-[13px]">Signed copy on file: <DownloadLink href={files.loanDocument(loan.id, p.signed_agreement.id)}>{p.signed_agreement.file_name}</DownloadLink> · {formatDate(p.signed_agreement.uploaded_on)}</p>
+          ? <p className="m-0 text-[13px]">Signed copy on file: <button className="ml-linkbtn break-all" onClick={() => setViewing(true)}>{p.signed_agreement.file_name}</button> · {formatDate(p.signed_agreement.uploaded_on)}. Open it to check every page is signed.</p>
           : <p className="m-0 text-[13px] text-ink-muted">Scan or photograph every signed page (one PDF is best). The loan can't be paid out without it.</p>}
         <UploadSigned loanId={loan.id} again={signed} onSaved={refresh} />
+        {viewing && p.signed_agreement && (
+          <DocumentViewer doc={p.signed_agreement} href={files.loanDocument(loan.id, p.signed_agreement.id)} onClose={() => setViewing(false)}
+            onRemove={async (reason) => { await api.staff.removeLoanDocument(loan.id, p.signed_agreement!.id, reason); refresh() }} />
+        )}
       </Step>
 
       <Step n={4} done={false} title="Pay out and record it" last>
-        {p.ready
+        {p.ready && !canPayOut && <p className="m-0 text-[13px] text-ink-muted">Ready. A credit manager pays out the loan and records it.</p>}
+        {p.ready && canPayOut
           ? <PayOut loan={loan} account={p.bank?.account_number ?? ''} phone={p.phone ?? ''} bank={p.bank ? `${p.bank.bank}${p.bank.branch ? `, ${p.bank.branch}` : ''} · ${p.bank.account_name}` : null} onDone={onDone} />
-          : <p className="m-0 text-[13px] text-ink-muted">{p.missing.join(' ') || 'Not ready yet.'}</p>}
+          : !p.ready && <p className="m-0 text-[13px] text-ink-muted">{p.missing.join(' ') || 'Not ready yet.'}</p>}
       </Step>
     </ol>
   )

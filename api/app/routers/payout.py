@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from ..deps import Services, services
-from ..domain.models import BorrowerDocument, ContactIn, LoanDetail, LoanEvent, PayoutStatus
+from ..domain.models import BorrowerDocument, ContactIn, LoanDetail, LoanEvent, PayoutStatus, RemoveIn
 from ..domain.uploads import UploadRejected, check_upload, content_disposition
 from ..security import StaffSession, staff_session
 
@@ -159,6 +159,39 @@ async def upload_signed(
     doc = await svc.backend.add_loan_document(s.cred, loan_id, "signed_agreement", name, ctype, data, svc.today())
     await add_note_safely(svc, s.cred, loan_id, f"Signed agreement uploaded ({name})")
     return doc
+
+
+@router.get("/{loan_id}/documents", response_model=list[BorrowerDocument])
+async def loan_documents(loan_id: int, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
+    """Files kept on the loan: the signed agreement and a PDF receipt for every repayment."""
+    return await svc.backend.list_loan_documents(s.cred, loan_id)
+
+
+@router.post("/{loan_id}/documents/{doc_id}/remove", status_code=204)
+async def remove_document(
+    loan_id: int,
+    doc_id: int,
+    body: RemoveIn,
+    s: StaffSession = Depends(staff_session),
+    svc: Services = Depends(services),
+):
+    """Only a signed agreement can be removed, and only before pay-out. Receipts are part of the payment record."""
+    loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    docs = await svc.backend.list_loan_documents(s.cred, loan_id)
+    doc = next((d for d in docs if d.id == doc_id), None)
+    if doc is None:
+        raise HTTPException(404, "Document not found.")
+    if doc.kind != "signed_agreement" or loan.state != "APPROVED":
+        raise HTTPException(409, "This document is part of the loan record and can't be removed.")
+    if any(h.text.startswith(PAYOUT_PENDING_MARK) for h in loan.history):  # pay-out waiting for a second approver
+        raise HTTPException(409, "The pay-out has been recorded, so the signed agreement stays on file.")
+    reason = " ".join(body.reason.split())
+    # The note is the audit trail, so it must be written before the file goes.
+    await svc.backend.add_loan_note(
+        s.cred, loan_id, f"Signed agreement removed ({doc.file_name}). Reason: {reason}", svc.today()
+    )
+    await svc.backend.delete_loan_document(s.cred, loan_id, doc_id)
+    return Response(status_code=204)
 
 
 @router.get("/{loan_id}/documents/{doc_id}")

@@ -1,6 +1,10 @@
 FROM python:3.12-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
+# Tesseract reads the text on ID cards (English is enough for PNG NID cards and licences).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 # Install exactly the dependencies listed in pyproject.toml (one list, so the image can't miss a package).
 RUN pip install --upgrade pip \
