@@ -14,6 +14,12 @@ class StaffTabClient(TestClient):
         return response
 
 
+def login_staff(client, username="demo"):
+    response = client.post("/api/staff/login", json={"username": username, "password": username})
+    assert response.status_code == 200, response.text
+    return {"X-MCL-User": response.json()["username"], "X-MCL-Tab": response.json()["tab_credential"]}
+
+
 @pytest.fixture
 def client():
     app = create_app(Settings(backend="demo", session_secret="test-secret", allowed_origins=["http://test"]))
