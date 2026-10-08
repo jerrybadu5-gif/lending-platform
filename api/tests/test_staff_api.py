@@ -1,5 +1,10 @@
 from decimal import Decimal as D
 
+import pytest
+from conftest import login_staff
+
+from app.security import staff_cookie_for
+
 
 def test_health(client):
     assert client.get("/api/health").json() == {"status": "ok", "backend": "demo"}
@@ -83,7 +88,7 @@ def test_cannot_approve_more_than_applied(staff):
 
 
 def test_loan_officer_cannot_approve(client):
-    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    login_staff(client, "officer")
     r = client.post("/api/staff/loans/533/approve", json={"amount": "8000"})
     assert r.status_code == 403
 
@@ -156,8 +161,7 @@ def test_login_rate_limited(client):
 
 
 def officer(client):
-    r = client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
-    assert r.status_code == 200
+    login_staff(client, "officer")
     return client
 
 
@@ -183,7 +187,7 @@ def test_officer_reviews_then_manager_decides(client):
     assert again.status_code == 409
 
     client.post("/api/staff/logout")
-    client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+    login_staff(client)
     pending = {l["id"]: l["review_stage"] for l in client.get("/api/staff/loans", params={"state": "PENDING"}).json()}
     assert pending[538] == "SUBMITTED" and pending[542] == "DRAFT"
     r = client.post("/api/staff/loans/538/return", json={"note": "Need a newer payslip"})
@@ -228,8 +232,10 @@ def test_manager_can_decline_or_send_back_before_the_officer_review(staff):
     assert r.status_code == 200 and r.json()["state"] == "REJECTED"
 
 
-def test_officer_cannot_send_up_without_documents(client):
+@pytest.mark.parametrize("approval_kyc", [True, False])
+def test_officer_cannot_send_up_without_documents(client, approval_kyc):
     officer(client)
+    client.app.state.services.settings.kyc_required_for_approval = approval_kyc
     # Joyce Ilave (542) has no bank statement or payroll deduction authority: neither advice can go up.
     for advice in ("APPROVE", "DECLINE"):
         r = client.post("/api/staff/loans/542/submit", json={"recommendation": advice, "note": "Checked what we have."})
@@ -253,21 +259,75 @@ def test_review_not_set_up_says_so(staff):
 
 
 def test_two_people_signed_in_in_one_browser(client):
-    # Grace signs in in one tab, John in another: each tab names its person and keeps it.
-    assert client.post("/api/staff/login", json={"username": "demo", "password": "demo"}).status_code == 200
-    assert client.post("/api/staff/login", json={"username": "officer", "password": "officer"}).status_code == 200
-    grace = {"X-MCL-User": "demo"}
-    john = {"X-MCL-User": "officer"}
+    grace = login_staff(client)
+    john = login_staff(client, "officer")
+    client.headers.clear()
     assert client.get("/api/staff/me", headers=grace).json()["display_name"] == "Grace Pokana"
     assert client.get("/api/staff/me", headers=john).json()["display_name"] == "John Kerema"
-    assert client.get("/api/staff/me").json()["display_name"] == "John Kerema"  # no header: the latest sign-in
+    assert "tab_token" not in client.get("/api/staff/me", headers=grace).json()
+    # Cookie-only requests and forged selectors cannot use either shared browser cookie.
+    for headers in (
+        {},
+        {"X-MCL-User": "demo"},
+        {**john, "X-MCL-User": "demo"},
+        {**grace, "X-MCL-User": "officer"},
+        {"X-MCL-Tab": grace["X-MCL-Tab"]},
+        {**grace, "X-MCL-Tab": "forged"},
+    ):
+        assert client.get("/api/staff/me", headers=headers).status_code == 401
+        assert client.post("/api/staff/logout", headers=headers).status_code == 401
+        assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=headers).status_code == 401
     assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=john).status_code == 403
-    # John signs out in his tab; Grace stays signed in in hers.
-    client.post("/api/staff/logout", headers=john)
+    # Both tabs can download files using their own credential.
+    for headers in (grace, john):
+        assert client.get("/api/staff/loans/533/schedule.pdf", headers=headers).status_code == 200
+    assert client.post("/api/staff/logout", headers=john).status_code == 204
     assert client.get("/api/staff/me", headers=john).status_code == 401
     assert client.get("/api/staff/me", headers=grace).status_code == 200
-    # A tab can't borrow another person's session by naming them.
-    assert client.get("/api/staff/me", headers={"X-MCL-User": "someone"}).status_code == 401
+
+
+@pytest.mark.parametrize("first,second", [("a.b", "ab"), ("Alice", "alice"), ("a" * 33, "a" * 32 + "b"), ("!", "?")])
+def test_cookie_names_do_not_collide(first, second):
+    assert staff_cookie_for(first) != staff_cookie_for(second)
+    assert staff_cookie_for(first) == staff_cookie_for(first)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_self_approval_setting_is_exposed_and_enforced(client, enabled):
+    settings = client.app.state.services.settings
+    settings.allow_self_approval = True
+    r = client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+    assert r.json()["allow_self_approval"] is True
+    client.headers.update({"X-MCL-User": "demo", "X-MCL-Tab": r.json()["tab_token"]})
+    assert (
+        client.post(
+            "/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked all documents."}
+        ).status_code
+        == 200
+    )
+    settings.allow_self_approval = enabled
+    assert client.get("/api/staff/me").json()["allow_self_approval"] is enabled
+    assert client.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == (200 if enabled else 409)
+
+
+def test_old_tab_credential_cannot_use_new_session(client):
+    old = login_staff(client)
+    fresh = login_staff(client)
+    assert old["X-MCL-Tab"] != fresh["X-MCL-Tab"]
+    assert client.get("/api/staff/me", headers=old).status_code == 401
+    assert client.get("/api/staff/me", headers=fresh).status_code == 200
+
+
+def test_complete_documents_allow_submission_when_approval_kyc_disabled(client):
+    officer(client)
+    client.app.state.services.settings.kyc_required_for_approval = False
+    assert (
+        client.post(
+            "/api/staff/loans/538/submit",
+            json={"recommendation": "DECLINE", "note": "Documents checked, income too low."},
+        ).status_code
+        == 200
+    )
 
 
 def test_successful_sign_ins_do_not_lock_anyone_out(client):

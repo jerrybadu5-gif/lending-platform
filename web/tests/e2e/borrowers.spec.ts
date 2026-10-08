@@ -82,8 +82,10 @@ test('sign up a borrower, upload KYC documents, take an application and approve 
 
   const agreement = page.getByRole('link', { name: 'Loan agreement (PDF)' })
   await expect(agreement).toBeVisible()
-  const res = await page.request.get((await agreement.getAttribute('href'))!)
-  expect(res.headers()['content-type']).toBe('application/pdf')
+  const href = (await agreement.getAttribute('href'))!
+  const response = page.waitForResponse((res) => res.url().endsWith(href))
+  await agreement.click()
+  expect((await response).headers()['content-type']).toBe('application/pdf')
 })
 
 test('find a borrower by NID number', async ({ page }) => {

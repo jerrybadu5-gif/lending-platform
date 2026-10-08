@@ -36,6 +36,7 @@ class StaffUser(BaseModel):
     username: str
     display_name: str
     roles: list[str] = []
+    allow_self_approval: bool = False
     review_required: bool = True  # approval waits for the loan officer's review (MCL_REVIEW_REQUIRED)
 
 

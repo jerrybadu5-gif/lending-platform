@@ -72,8 +72,10 @@ test('record a mobile money repayment', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Print receipt (PDF)' })).toBeVisible()
   const listed = page.getByRole('region', { name: 'Receipts recorded' })
   await expect(listed.getByText('Mary Kila')).toBeVisible()
-  const res = await page.request.get((await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!)
-  expect(res.headers()['content-type']).toBe('application/pdf')
+  const href = (await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!
+  const response = page.waitForResponse((res) => res.url().endsWith(href))
+  await listed.getByRole('link', { name: 'Print receipt' }).click()
+  expect((await response).headers()['content-type']).toBe('application/pdf')
 })
 
 

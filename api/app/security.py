@@ -15,7 +15,7 @@ import re
 import secrets
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -25,16 +25,16 @@ from .config import Settings
 
 STAFF_COOKIE = "mcl_staff"
 PORTAL_COOKIE = "mcl_portal"
-# Staff may be signed in as different people in different tabs of one browser (a loan officer and a credit
-# manager testing together, or a manager covering for someone). Each person gets their own cookie,
-# mcl_staff_<username>, and each tab says whose it is with this header. The plain mcl_staff cookie is the latest
-# sign-in, used by a request without the header (a link opened outside the app).
+# Cookies are shared by browser tabs. Selecting a user's cookie also requires the random
+# credential returned at login and held in that tab's sessionStorage.
 STAFF_USER_HEADER = "X-MCL-User"
+STAFF_TAB_HEADER = "X-MCL-Tab"
 
 
 def staff_cookie_for(username: str) -> str:
     slug = re.sub(r"[^a-z0-9]", "", username.lower())[:32]
-    return f"{STAFF_COOKIE}_{slug or hashlib.sha256(username.encode()).hexdigest()[:16]}"
+    digest = hashlib.sha256(username.encode()).hexdigest()
+    return f"{STAFF_COOKIE}_{slug}_{digest}"
 
 
 @dataclass
@@ -43,6 +43,7 @@ class StaffSession:
     display_name: str
     roles: list[str]
     cred: str
+    tab_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
 
 
 @dataclass
@@ -120,7 +121,7 @@ def _session_id(request: Request, settings: Settings, cookie: str) -> str | None
 
 
 def _staff_cookie(request: Request) -> str:
-    """The cookie for the person this tab is signed in as, or the latest sign-in."""
+    """Select a cookie; _lookup must also verify the tab credential before using it."""
     user = request.headers.get(STAFF_USER_HEADER, "").strip()
     return staff_cookie_for(user) if user else STAFF_COOKIE
 
@@ -129,7 +130,9 @@ def end_session(request: Request, response: Response, svc: Any, cookie: str) -> 
     if cookie == STAFF_COOKIE:
         mine = _staff_cookie(request)
         sid = _session_id(request, svc.settings, mine)
-        data = svc.sessions.get(sid) if sid else None
+        data = _lookup(request, svc, mine, StaffSession)
+        if data is None:
+            raise HTTPException(401, "Please sign in.")
         if sid:
             svc.sessions.delete(sid)
         response.delete_cookie(mine, path="/")
@@ -147,13 +150,19 @@ def end_session(request: Request, response: Response, svc: Any, cookie: str) -> 
 def _lookup(request: Request, svc: Any, cookie: str, kind: type) -> Any | None:
     sid = _session_id(request, svc.settings, cookie)
     data = svc.sessions.get(sid) if sid else None
-    return data if isinstance(data, kind) else None
+    if not isinstance(data, kind):
+        return None
+    if isinstance(data, StaffSession):
+        token = request.headers.get(STAFF_TAB_HEADER, "")
+        user = request.headers.get(STAFF_USER_HEADER, "").strip()
+        if not hmac.compare_digest(token.encode(), data.tab_token.encode()) or (user and user != data.username):
+            return None
+    return data
 
 
 def staff_session(request: Request, svc: Any = Depends(_services)) -> StaffSession:
     data = _lookup(request, svc, _staff_cookie(request), StaffSession)
-    user = request.headers.get(STAFF_USER_HEADER, "").strip()
-    if data is None or (user and data.username.lower() != user.lower()):
+    if data is None:
         raise HTTPException(401, "Please sign in.")
     return data
 

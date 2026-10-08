@@ -15,7 +15,7 @@ export function fileNameFrom(header: string | null): string | null {
 /**
  * A download link that fetches the file first, so a refused download (session ended, document
  * missing, loan not approved yet) shows its message instead of saving the error as a file.
- * The href stays real, so the link still works with a middle click or without JavaScript.
+ * Staff downloads need this click handler to attach the tab credential.
  */
 export function DownloadLink({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
   const [busy, setBusy] = useState(false)

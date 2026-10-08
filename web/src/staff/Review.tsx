@@ -111,14 +111,14 @@ export function OfficerSummary({ loan }: { loan: LoanDetail }) {
 }
 
 /** Credit manager, the final say: approve, reject, or send back to the loan officer with a note. */
-export function ManagerDecision({ loan, suggested, onDone, username, reviewRequired = true }:
-  { loan: LoanDetail; suggested: string; onDone: (r: ActionResult) => void; username?: string; reviewRequired?: boolean }) {
+export function ManagerDecision({ loan, suggested, onDone, username, reviewRequired = true, allowSelfApproval = false }:
+  { loan: LoanDetail; suggested: string; onDone: (r: ActionResult) => void; username?: string; reviewRequired?: boolean; allowSelfApproval?: boolean }) {
   const qc = useQueryClient()
   const stage = loan.review?.stage ?? 'DRAFT'
   const submitted = stage === 'SUBMITTED'
   // Approval waits for the officer's review (MCL_REVIEW_REQUIRED); rejecting or sending back doesn't.
   const waiting = reviewRequired && !submitted
-  const own = submitted && !!username && loan.review?.submitted_user === username
+  const own = reviewRequired && !allowSelfApproval && submitted && !!username && loan.review?.submitted_user === username
   const refresh = useLoanRefresh(loan.id)
   const officerAmount = loan.review?.officer_amount ? formatKina(loan.review.officer_amount, { currency: false }) : null
   const [amount, setAmount] = useState(officerAmount ?? suggested)

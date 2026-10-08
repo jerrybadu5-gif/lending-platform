@@ -192,7 +192,7 @@ function Decision({ loan }: { loan: LoanDetail }) {
 
       {loan.state === 'PENDING' && !me && <Skeleton h={160} />}
       {loan.state === 'PENDING' && me && isApprover && (
-        <ManagerDecision loan={loan} suggested={suggestedAmount(loan)} onDone={done} username={me.username} reviewRequired={me.review_required ?? true} />
+        <ManagerDecision key={`${loan.id}:${stage}:${loan.review?.officer_amount}`} loan={loan} suggested={suggestedAmount(loan)} onDone={done} username={me.username} reviewRequired={me.review_required ?? true} allowSelfApproval={me.allow_self_approval ?? false} />
       )}
       {loan.state === 'PENDING' && me && !isApprover && stage !== 'SUBMITTED' && <OfficerReview loan={loan} suggested={suggestedAmount(loan)} />}
       {loan.state === 'PENDING' && me && !isApprover && stage === 'SUBMITTED' && (
