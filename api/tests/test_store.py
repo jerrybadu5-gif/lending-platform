@@ -38,7 +38,7 @@ def test_staff_stay_signed_in_across_a_restart(db):
         login = first.post("/api/staff/login", json={"username": "demo", "password": "demo"})
         assert login.status_code == 200
         cookies = dict(first.cookies)
-        headers = {"X-MCL-User": login.json()["username"], "X-MCL-Tab": login.json()["tab_token"]}
+        headers = {"X-MCL-User": login.json()["username"], "X-MCL-Tab": login.json()["tab_credential"]}
     # The browser retains its cookie and tab credential across an API restart.
     with TestClient(app_on(db), cookies=cookies, headers=headers) as second:
         r = second.get("/api/staff/me")

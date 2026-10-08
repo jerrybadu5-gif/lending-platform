@@ -66,7 +66,9 @@ and each step is also written as a loan note. `MCL_REVIEW_REQUIRED=false` turns 
 If `dt_loan_review` is missing in Fineract, sending up and deciding are refused with a message saying so.
 
 Staff can be signed in as different people in different tabs of one browser (for example the loan officer and the
-credit manager testing side by side). Each tab remembers who signed in there and the API uses that person's session.
+credit manager testing side by side). Each tab stores its username and a random session-bound credential in
+sessionStorage. Staff requests require `X-MCL-User`, `X-MCL-Tab`, and the matching signed per-person cookie;
+headerless requests are refused. Cookie names and username matching are case-insensitive.
 "Sign in as someone else (new tab)" in the menu opens a tab for a second person.
 
 ## Security
@@ -79,11 +81,7 @@ credit manager testing side by side). Each tab remembers who signed in there and
 - Loans can't be approved until the borrower's KYC documents are on file (`MCL_KYC_REQUIRED`, `MCL_KYC_REQUIRED_FOR_APPROVAL`).
 - Money is `Decimal` in Python and a decimal string in JSON and in the browser. No floating-point maths touches amounts.
 - Caddy sends a strict Content-Security-Policy and other security headers. The API sends `Cache-Control: no-store`. The service worker caches the app shell only, never API answers.
-- Sessions, sign-in codes and lock-outs are kept in McLender's own PostgreSQL database (`mclender`, created by
-  `deploy/mclender-db.sh` on every start), so restarting the API signs nobody out. Session ids are stored only as a
-  hash and their contents encrypted with a key from `MCL_SESSION_SECRET` (changing that secret signs everyone out).
-  Without `MCLENDER_DB_PASSWORD` they stay in memory, as in the demo. Still run one API worker until settings and
-  the audit log move there too (Phase 1).
+- Run **one API worker**: SMS codes and rate limits live in memory. Move them to the database before running more than one.
 
 ## Checking against Fineract
 

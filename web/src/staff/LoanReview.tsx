@@ -173,7 +173,7 @@ function LoanDocuments({ loan }: { loan: LoanDetail }) {
   )
 }
 
-function Decision({ loan }: { loan: LoanDetail }) {
+export function Decision({ loan }: { loan: LoanDetail }) {
   const { isApprover, me } = useMe()
   const refresh = useLoanRefresh(loan.id)
   const [result, setResult] = useState<ActionResult | null>(null)

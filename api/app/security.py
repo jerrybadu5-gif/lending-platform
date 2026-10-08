@@ -3,8 +3,8 @@
 Sessions live on the server. The browser only gets a random session id in an HttpOnly,
 SameSite=Strict cookie (signed, so a tampered id is rejected before any lookup); the
 staff member's Fineract credential never leaves the server. Sessions, one-time codes and
-rate limits here are kept in memory, for the demo and tests; with MCL_DATABASE_URL set, app/store.py keeps
-them in McLender's database instead, so a restart signs nobody out.
+rate limits are kept in memory: run a single API worker (a restart signs everyone out),
+or move them to the database before scaling out.
 """
 
 from __future__ import annotations
@@ -25,15 +25,19 @@ from .config import Settings
 
 STAFF_COOKIE = "mcl_staff"
 PORTAL_COOKIE = "mcl_portal"
-# Cookies are shared by browser tabs. Selecting a user's cookie also requires the random
-# credential returned at login and held in that tab's sessionStorage.
+# Each tab must present both its username and a session-bound secret.
 STAFF_USER_HEADER = "X-MCL-User"
 STAFF_TAB_HEADER = "X-MCL-Tab"
 
 
+def _canonical_user(username: str) -> str:
+    return username.strip().lower()
+
+
 def staff_cookie_for(username: str) -> str:
-    slug = re.sub(r"[^a-z0-9]", "", username.lower())[:32]
-    digest = hashlib.sha256(username.encode()).hexdigest()
+    canonical = _canonical_user(username)
+    slug = re.sub(r"[^a-z0-9]", "", canonical)[:32] or "user"
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
     return f"{STAFF_COOKIE}_{slug}_{digest}"
 
 
@@ -43,7 +47,7 @@ class StaffSession:
     display_name: str
     roles: list[str]
     cred: str
-    tab_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
+    tab_credential: str = field(default_factory=lambda: secrets.token_urlsafe(32))
 
 
 @dataclass
@@ -121,7 +125,7 @@ def _session_id(request: Request, settings: Settings, cookie: str) -> str | None
 
 
 def _staff_cookie(request: Request) -> str:
-    """Select a cookie; _lookup must also verify the tab credential before using it."""
+    """The cookie selected by this tab; lookup still requires its credential."""
     user = request.headers.get(STAFF_USER_HEADER, "").strip()
     return staff_cookie_for(user) if user else STAFF_COOKIE
 
@@ -153,9 +157,14 @@ def _lookup(request: Request, svc: Any, cookie: str, kind: type) -> Any | None:
     if not isinstance(data, kind):
         return None
     if isinstance(data, StaffSession):
-        token = request.headers.get(STAFF_TAB_HEADER, "")
-        user = request.headers.get(STAFF_USER_HEADER, "").strip()
-        if not hmac.compare_digest(token.encode(), data.tab_token.encode()) or (user and user != data.username):
+        user = request.headers.get(STAFF_USER_HEADER, "")
+        credential = request.headers.get(STAFF_TAB_HEADER, "")
+        if (
+            not user
+            or not credential
+            or _canonical_user(user) != _canonical_user(data.username)
+            or not hmac.compare_digest(credential.encode(), data.tab_credential.encode())
+        ):
             return None
     return data
 

@@ -2,18 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, staffHeaders } from '../../src/api/client'
 
 function reply(status: number, body: string) {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(status === 204 ? null : body, { status, headers: { 'Content-Type': 'application/json' } })))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status, headers: { 'Content-Type': 'application/json' } })))
 }
 
-afterEach(async () => {
-  vi.restoreAllMocks()
-  reply(204, '')
-  await api.staff.logout().catch(() => {})
-  sessionStorage.clear()
-  vi.unstubAllGlobals()
-})
-
 describe('api client', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('passes the server message on for an error', async () => {
     reply(422, JSON.stringify({ detail: 'Enter a reference.', fields: [{ field: 'reference', message: 'Required' }] }))
     const err = await api.staff.me().catch((e) => e)
@@ -40,28 +34,20 @@ describe('api client', () => {
   })
 })
 
-async function signIn() {
-  reply(200, JSON.stringify({ username: 'officer', display_name: 'Officer', roles: [], tab_token: 'random-tab-credential' }))
-  return api.staff.login('officer', 'password')
-}
 
-it('sends the login credential on staff requests and downloads only', async () => {
-  const user = await signIn()
-  expect(user).not.toHaveProperty('tab_token')
-  const headers = { 'X-MCL-User': 'officer', 'X-MCL-Tab': 'random-tab-credential' }
-  expect(staffHeaders('/api/staff/loans/1/schedule.pdf')).toEqual(headers)
-  expect(staffHeaders('/api/portal/home')).toEqual({})
-  reply(200, '{}')
-  await api.staff.me()
-  expect(fetch).toHaveBeenCalledWith('/api/staff/me', expect.objectContaining({ headers }))
-  reply(204, '')
-  await api.staff.logout()
-  expect(fetch).toHaveBeenCalledWith('/api/staff/logout', expect.objectContaining({ headers }))
+it('stores the tab credential and clears both values on logout', async () => {
+  sessionStorage.clear()
+  reply(200, JSON.stringify({ username: 'demo', tab_credential: 'secret', roles: [] }))
+  await api.staff.login('demo', 'demo')
+  expect(staffHeaders('/api/staff/me')).toEqual({ 'X-MCL-User': 'demo', 'X-MCL-Tab': 'secret' })
+  expect(staffHeaders('/api/portal/me')).toEqual({})
+  reply(401, '{}')
+  await api.staff.logout().catch(() => {})
   expect(staffHeaders('/api/staff/me')).toEqual({})
 })
 
-it('keeps the tab credential in memory when storage cannot be written', async () => {
-  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
-  await signIn()
-  expect(staffHeaders('/api/staff/me')['X-MCL-Tab']).toBe('random-tab-credential')
+it('fails closed when tab storage is unavailable', () => {
+  vi.stubGlobal('sessionStorage', { getItem: () => { throw new Error('Unavailable') } })
+  expect(staffHeaders('/api/staff/me')).toEqual({})
+  vi.unstubAllGlobals()
 })

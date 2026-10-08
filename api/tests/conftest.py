@@ -5,19 +5,26 @@ from app.config import Settings
 from app.main import create_app
 
 
-@pytest.fixture
-def client():
-    app = create_app(Settings(backend="demo", session_secret="test-secret", allowed_origins=["http://test"]))
-    with TestClient(app) as c:
-        yield c
+class StaffTabClient(TestClient):
+    def post(self, url, *args, **kwargs):
+        response = super().post(url, *args, **kwargs)
+        if url == "/api/staff/login" and response.status_code == 200:
+            user = response.json()
+            self.headers.update({"X-MCL-User": user["username"], "X-MCL-Tab": user["tab_credential"]})
+        return response
 
 
 def login_staff(client, username="demo"):
-    r = client.post("/api/staff/login", json={"username": username, "password": username})
-    assert r.status_code == 200, r.text
-    headers = {"X-MCL-User": r.json()["username"], "X-MCL-Tab": r.json()["tab_token"]}
-    client.headers.update(headers)
-    return headers
+    response = client.post("/api/staff/login", json={"username": username, "password": username})
+    assert response.status_code == 200, response.text
+    return {"X-MCL-User": response.json()["username"], "X-MCL-Tab": response.json()["tab_credential"]}
+
+
+@pytest.fixture
+def client():
+    app = create_app(Settings(backend="demo", session_secret="test-secret", allowed_origins=["http://test"]))
+    with StaffTabClient(app) as c:
+        yield c
 
 
 @pytest.fixture

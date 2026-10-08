@@ -69,7 +69,7 @@ def test_scan_reads_printed_card_and_crops_the_face(monkeypatch):
 
 def test_scan_without_a_face_says_so(monkeypatch):
     monkeypatch.setattr(idcard, "find_face", lambda img: None)
-    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: None)
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6, timeout=25: None)
     out = idcard.scan(card("x"), "image/png")
     assert out.photo is None and len(out.problems) == 2 and "No face" in out.problems[0]
 
@@ -89,7 +89,7 @@ def test_clean_photo_redraws_as_a_portrait_jpeg():
 
 def test_scan_and_save_photo_through_the_api(staff, monkeypatch):
     monkeypatch.setattr(idcard, "find_face", lambda img: (1060, 300, 180, 220))
-    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: PNG_NID)
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6, timeout=25: PNG_NID)
     up = staff.post(
         "/api/staff/borrowers/8/documents", data={"kind": "id"}, files={"file": ("nid.png", card("x"), "image/png")}
     ).json()
@@ -162,7 +162,7 @@ def _pdf_with_text(text: str) -> bytes:
 
 def test_passport_pdf_is_read_from_its_text_layer(monkeypatch):
     monkeypatch.setattr(idcard, "find_face", lambda img: None)
-    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: "")  # no OCR needed for a digital PDF
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6, timeout=25: "")  # no OCR needed for a digital PDF
     out = idcard.scan(_pdf_with_text(PASSPORT), "application/pdf")
     assert out.suggestions.document_number == "PA1234567" and out.suggestions.last_name == "Wambi"
     assert out.text_read
@@ -181,3 +181,59 @@ def test_scanned_sideways_pdf_is_turned_and_read(monkeypatch):
 def test_locked_pdf_says_why():
     with pytest.raises(idcard.ScanError, match="PDF"):
         idcard.scan(b"%PDF-1.4 not really a pdf", "application/pdf")
+
+
+def test_scan_budget_retains_partial_reading_and_keeps_finding_faces(monkeypatch):
+    now = [0.0]
+    calls = []
+    faces = []
+    monkeypatch.setattr(idcard.time, "monotonic", lambda: now[0])
+
+    def read(img, psm=6, timeout=25):
+        calls.append((psm, timeout))
+        now[0] += timeout
+        return "Surname: WAMBI"
+
+    def face(img):
+        faces.append(img.size)
+        return (10, 10, 50, 60) if len(faces) == 3 else None
+
+    monkeypatch.setattr(idcard, "read_text", read)
+    monkeypatch.setattr(idcard, "find_face", face)
+    out = idcard.scan(card("x"), "image/png")
+    assert calls == [(6, idcard.OCR_BUDGET_SECONDS)]
+    assert out.suggestions.last_name == "Wambi"
+    assert out.text_read and out.photo is not None and len(faces) == 3
+
+
+def test_scan_preserves_layouts_and_sideways_reading_with_remaining_budget(monkeypatch):
+    now = [0.0]
+    calls = []
+    monkeypatch.setattr(idcard.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(idcard, "find_face", lambda img: None)
+
+    def read(img, psm=6, timeout=25):
+        calls.append((psm, timeout))
+        now[0] += 2
+        return PNG_NID if len(calls) == 3 else ""
+
+    monkeypatch.setattr(idcard, "read_text", read)
+    out = idcard.scan(card("x"), "image/png")
+    assert calls == [(6, 25), (11, 23), (6, 21)]
+    assert out.suggestions.last_name == "Wambi"
+
+
+def test_pdf_text_is_read_even_after_ocr_budget_expires(monkeypatch):
+    now = [0.0]
+    img = Image.new("RGB", (100, 100))
+    monkeypatch.setattr(idcard, "pdf_pages", lambda data: [(img, ""), (img, PASSPORT)])
+    monkeypatch.setattr(idcard.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(idcard, "find_face", lambda img: None)
+
+    def read(img, psm=6, timeout=25):
+        now[0] += timeout
+        return ""
+
+    monkeypatch.setattr(idcard, "read_text", read)
+    out = idcard.scan(b"pdf", "application/pdf")
+    assert out.suggestions.document_number == "PA1234567"

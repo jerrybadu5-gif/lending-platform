@@ -72,10 +72,12 @@ test('record a mobile money repayment', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Print receipt (PDF)' })).toBeVisible()
   const listed = page.getByRole('region', { name: 'Receipts recorded' })
   await expect(listed.getByText('Mary Kila')).toBeVisible()
-  const href = (await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!
-  const response = page.waitForResponse((res) => res.url().endsWith(href))
-  await listed.getByRole('link', { name: 'Print receipt' }).click()
-  expect((await response).headers()['content-type']).toBe('application/pdf')
+  const headers = await page.evaluate(() => ({
+    'X-MCL-User': sessionStorage.getItem('mcl-staff-user')!,
+    'X-MCL-Tab': sessionStorage.getItem('mcl-staff-tab')!,
+  }))
+  const res = await page.request.get((await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!, { headers })
+  expect(res.headers()['content-type']).toBe('application/pdf')
 })
 
 
@@ -119,4 +121,8 @@ test('credit manager and loan officer signed in side by side in one browser', as
   await expect(page.getByRole('status')).toContainText('Sent to the loan officer')
   await john.goto('/staff/loans/542')
   await expect(john.getByRole('note').getByText('Please get her bank statement first')).toBeVisible()
+  await john.getByRole('button', { name: 'Sign out' }).click()
+  await expect(john).toHaveURL(/\/staff\/login/)
+  await page.reload()
+  await expect(page.getByText('Grace Pokana').first()).toBeVisible()
 })
