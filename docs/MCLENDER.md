@@ -66,7 +66,9 @@ and each step is also written as a loan note. `MCL_REVIEW_REQUIRED=false` turns 
 If `dt_loan_review` is missing in Fineract, sending up and deciding are refused with a message saying so.
 
 Staff can be signed in as different people in different tabs of one browser (for example the loan officer and the
-credit manager testing side by side). Each tab remembers who signed in there and the API uses that person's session.
+credit manager testing side by side). Each tab stores its username and a random session-bound credential in
+sessionStorage. Staff requests require `X-MCL-User`, `X-MCL-Tab`, and the matching signed per-person cookie;
+headerless requests are refused. Cookie names and username matching are case-insensitive.
 "Sign in as someone else (new tab)" in the menu opens a tab for a second person.
 
 ## Security

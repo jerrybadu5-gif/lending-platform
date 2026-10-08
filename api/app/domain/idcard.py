@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 log = logging.getLogger("mclender.idcard")
 
 PHOTO_SIZE = (300, 375)  # 4:5 portrait, enough for a profile and small enough to store
+OCR_BUDGET_SECONDS = 25.0
 MAX_PIXELS = 40_000_000  # refuse decompression bombs
 
 
@@ -154,7 +156,7 @@ def crop_portrait(img: Any, box: tuple[int, int, int, int]) -> bytes:
     return buf.getvalue()
 
 
-def read_text(img: Any, psm: int = 6) -> str | None:
+def read_text(img: Any, psm: int = 6, timeout: float = OCR_BUDGET_SECONDS) -> str | None:
     """The card's printed text, or None when Tesseract isn't installed."""
     try:
         import pytesseract
@@ -167,7 +169,7 @@ def read_text(img: Any, psm: int = 6) -> str | None:
         if max(grey.size) < 1400:  # small photos read better enlarged
             f = 1400 / max(grey.size)
             grey = grey.resize((int(grey.width * f), int(grey.height * f)))
-        return str(pytesseract.image_to_string(grey, config=f"--psm {psm}", timeout=25))
+        return str(pytesseract.image_to_string(grey, config=f"--psm {psm}", timeout=timeout))
     except (pytesseract.TesseractNotFoundError, OSError):
         return None
     except RuntimeError:  # timed out
@@ -367,7 +369,9 @@ def _score(s: IdSuggestions) -> int:
     return sum(v is not None for v in vars(s).values())
 
 
-def _read(img: Any, pdf_text: str = "", layouts: tuple[int, ...] = (6, 11)) -> tuple[IdSuggestions, bool]:
+def _read(
+    img: Any, pdf_text: str = "", layouts: tuple[int, ...] = (6, 11), deadline: float | None = None
+) -> tuple[IdSuggestions, bool]:
     """The best reading of one page: its PDF text layer if it has one, else OCR in two layouts. Returns
     (suggestions, whether text reading is installed)."""
     best = parse_card_text(pdf_text) if pdf_text.strip() else IdSuggestions()
@@ -375,7 +379,10 @@ def _read(img: Any, pdf_text: str = "", layouts: tuple[int, ...] = (6, 11)) -> t
         return best, True
     available = True
     for psm in layouts:  # 6: a block of text (labels, the passport code); 11: scattered words on a card
-        text = read_text(img, psm)
+        remaining = deadline - time.monotonic() if deadline is not None else OCR_BUDGET_SECONDS
+        if remaining <= 0:
+            break
+        text = read_text(img, psm, timeout=remaining)
         if text is None:
             available = False
             break
@@ -393,6 +400,7 @@ def _turns(img: Any) -> list[Any]:
 
 def scan(data: bytes, content_type: str) -> IdScan:
     out = IdScan()
+    deadline = time.monotonic() + OCR_BUDGET_SECONDS
     pdf = content_type == "application/pdf"
     pages = pdf_pages(data) if pdf else [(load_image(data, content_type), "")]
 
@@ -412,7 +420,7 @@ def scan(data: bytes, content_type: str) -> IdScan:
                     out.photo = crop_portrait(turned, box)
             if _score(best) < 4 and text_ok:
                 upright = turned is img
-                found, text_ok = _read(turned, pdf_text if upright else "", (6, 11) if upright else (6,))
+                found, text_ok = _read(turned, pdf_text if upright else "", (6, 11) if upright else (6,), deadline)
                 if _score(found) > _score(best):
                     best = found
             if out.photo is not None and (_score(best) >= 4 or not text_ok):

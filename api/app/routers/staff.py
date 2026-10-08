@@ -43,10 +43,6 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
-class StaffLogin(StaffUser):
-    tab_token: str
-
-
 def is_approver(s: StaffSession) -> bool:
     return bool(APPROVER_ROLES & {r.lower() for r in s.roles})
 
@@ -76,21 +72,28 @@ def _require_submitted(svc: Services, loan: LoanDetail, s: StaffSession | None =
         )
 
 
-@router.post("/login", response_model=StaffLogin)
+class StaffLoginOut(StaffUser):
+    tab_credential: str
+
+
+@router.post("/login", response_model=StaffLoginOut)
 async def login(body: LoginIn, request: Request, response: Response, svc: Services = Depends(services)):
     key = f"{request.client.host if request.client else '-'}:{body.username.lower()}"
     svc.login_limit.check(key)
     user, cred = await svc.backend.authenticate(body.username, body.password)
     svc.login_limit.reset(key)  # only failed attempts count towards the limit
     session = StaffSession(username=user.username, display_name=user.display_name, roles=user.roles, cred=cred)
-    start_session(response, svc, STAFF_COOKIE, session)
-    return StaffLogin(
-        username=user.username,
-        display_name=user.display_name,
-        roles=user.roles,
+    start_session(
+        response,
+        svc,
+        STAFF_COOKIE,
+        session,
+    )
+    return StaffLoginOut(
+        **user.model_dump(exclude={"review_required", "allow_self_approval"}),
         review_required=svc.settings.review_required,
         allow_self_approval=svc.settings.allow_self_approval,
-        tab_token=session.tab_token,
+        tab_credential=session.tab_credential,
     )
 
 
@@ -102,11 +105,8 @@ async def logout(request: Request, response: Response, svc: Services = Depends(s
 @router.get("/me", response_model=StaffUser)
 async def me(s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
     return StaffUser(
-        username=s.username,
-        display_name=s.display_name,
-        roles=s.roles,
-        review_required=svc.settings.review_required,
-        allow_self_approval=svc.settings.allow_self_approval,
+        username=s.username, display_name=s.display_name, roles=s.roles, review_required=svc.settings.review_required,
+        allow_self_approval=svc.settings.allow_self_approval
     )
 
 
@@ -169,17 +169,20 @@ async def approve(
     return result
 
 
-async def _require_kyc(svc: Services, cred: str, loan_id: int, *, submission: bool = False) -> LoanDetail:
+async def _require_kyc(svc: Services, cred: str, loan_id: int) -> LoanDetail:
     """Approval and payout both need the borrower's KYC documents on file (a loan may have been approved
-    elsewhere, e.g. in Mifos X or before this check existed). Submission always requires documents,
-    regardless of the approval setting. Returns the loan, so callers needn't load it again."""
+    elsewhere, e.g. in Mifos X or before this check existed). Returns the loan, so callers needn't load it again."""
     detail = await svc.backend.get_loan(cred, loan_id, svc.today())
-    if not submission and not svc.settings.kyc_required_for_approval:
+    if not svc.settings.kyc_required_for_approval:
         return detail
+    await _require_documents(svc, cred, detail)
+    return detail
+
+
+async def _require_documents(svc: Services, cred: str, detail: LoanDetail) -> None:
     kyc = await borrower_kyc(svc, cred, detail.borrower.id)
     if not kyc.complete:
         raise HTTPException(409, "Upload these documents for the borrower first: " + "; ".join(kyc.missing) + ".")
-    return detail
 
 
 @router.post("/loans/{loan_id}/reject", response_model=ActionResult)
@@ -214,7 +217,8 @@ async def submit(
         # The credit manager decides (approve, reject, or send back for more work); sending up is the officer's step.
         raise HTTPException(403, "A credit manager decides applications. Approve, reject, or send it back instead.")
     # The officer sends an application up only with the borrower's documents complete.
-    loan = await _require_kyc(svc, s.cred, loan_id, submission=True)
+    loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    await _require_documents(svc, s.cred, loan)
     if loan.state != "PENDING":
         raise HTTPException(409, "Only an application waiting for a decision can be sent for approval.")
     prior = loan.review

@@ -1,7 +1,5 @@
 from datetime import date
 
-from conftest import login_staff
-
 PDF = b"%PDF-1.4\n% test\n%%EOF\n"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 20
 
@@ -140,12 +138,12 @@ def test_approval_needs_kyc_documents(staff):
 
 def test_kyc_gate_can_be_turned_off(staff):
     staff.app.state.services.settings.kyc_required_for_approval = False
-    staff.app.state.services.settings.review_required = False  # exercise approval independently of submission
+    staff.app.state.services.settings.review_required = False
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
 
 
 def test_loan_officer_can_sign_up_borrowers(client):
-    login_staff(client, "officer")
+    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
     assert client.post("/api/staff/borrowers", json=NEW).status_code == 201
 
 
@@ -160,7 +158,7 @@ def test_safe_file_names():
 def test_disbursement_also_needs_kyc(staff):
     # A loan approved elsewhere (or before the check existed) can't be paid out without documents.
     staff.app.state.services.settings.kyc_required_for_approval = False
-    staff.app.state.services.settings.review_required = False  # exercise approval independently of submission
+    staff.app.state.services.settings.review_required = False
     assert staff.post("/api/staff/loans/542/approve", json={"amount": "6500"}).status_code == 200
     staff.app.state.services.settings.kyc_required_for_approval = True
     r = staff.post("/api/staff/loans/542/disburse", json={"reference": "TT-1"})

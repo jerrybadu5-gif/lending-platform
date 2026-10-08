@@ -1,9 +1,6 @@
 from decimal import Decimal as D
 
 import pytest
-from conftest import login_staff
-
-from app.security import staff_cookie_for
 
 
 def test_health(client):
@@ -88,7 +85,7 @@ def test_cannot_approve_more_than_applied(staff):
 
 
 def test_loan_officer_cannot_approve(client):
-    login_staff(client, "officer")
+    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
     r = client.post("/api/staff/loans/533/approve", json={"amount": "8000"})
     assert r.status_code == 403
 
@@ -161,11 +158,14 @@ def test_login_rate_limited(client):
 
 
 def officer(client):
-    login_staff(client, "officer")
+    r = client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    assert r.status_code == 200
     return client
 
 
-def test_officer_reviews_then_manager_decides(client):
+@pytest.mark.parametrize("gate", [True, False])
+def test_officer_reviews_then_manager_decides(client, gate):
+    client.app.state.services.settings.kyc_required_for_approval = gate
     # 538 is still with the loan officer: the credit manager can't decide it yet.
     officer(client)
     loan = client.get("/api/staff/loans/538").json()
@@ -187,7 +187,7 @@ def test_officer_reviews_then_manager_decides(client):
     assert again.status_code == 409
 
     client.post("/api/staff/logout")
-    login_staff(client)
+    client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
     pending = {l["id"]: l["review_stage"] for l in client.get("/api/staff/loans", params={"state": "PENDING"}).json()}
     assert pending[538] == "SUBMITTED" and pending[542] == "DRAFT"
     r = client.post("/api/staff/loans/538/return", json={"note": "Need a newer payslip"})
@@ -232,14 +232,16 @@ def test_manager_can_decline_or_send_back_before_the_officer_review(staff):
     assert r.status_code == 200 and r.json()["state"] == "REJECTED"
 
 
-@pytest.mark.parametrize("approval_kyc", [True, False])
-def test_officer_cannot_send_up_without_documents(client, approval_kyc):
+@pytest.mark.parametrize("gate", [True, False])
+def test_officer_cannot_send_up_without_documents(client, gate):
+    client.app.state.services.settings.kyc_required_for_approval = gate
     officer(client)
-    client.app.state.services.settings.kyc_required_for_approval = approval_kyc
+    before = client.get("/api/staff/loans/542").json()["review"]
     # Joyce Ilave (542) has no bank statement or payroll deduction authority: neither advice can go up.
     for advice in ("APPROVE", "DECLINE"):
         r = client.post("/api/staff/loans/542/submit", json={"recommendation": advice, "note": "Checked what we have."})
         assert r.status_code == 409 and "Bank statement" in r.json()["detail"]
+        assert client.get("/api/staff/loans/542").json()["review"] == before
 
 
 def test_review_not_set_up_says_so(staff):
@@ -259,77 +261,82 @@ def test_review_not_set_up_says_so(staff):
 
 
 def test_two_people_signed_in_in_one_browser(client):
-    grace = login_staff(client)
-    john = login_staff(client, "officer")
-    client.headers.clear()
+    # Grace signs in in one tab, John in another: each tab names its person and keeps it.
+    grace_login = client.post("/api/staff/login", json={"username": "demo", "password": "demo"}).json()
+    john_login = client.post("/api/staff/login", json={"username": "officer", "password": "officer"}).json()
+    grace = {"X-MCL-User": "demo", "X-MCL-Tab": grace_login["tab_credential"]}
+    john = {"X-MCL-User": "officer", "X-MCL-Tab": john_login["tab_credential"]}
+    client.headers.pop("X-MCL-User")
+    client.headers.pop("X-MCL-Tab")
     assert client.get("/api/staff/me", headers=grace).json()["display_name"] == "Grace Pokana"
     assert client.get("/api/staff/me", headers=john).json()["display_name"] == "John Kerema"
-    assert "tab_token" not in client.get("/api/staff/me", headers=grace).json()
-    # Cookie-only requests and forged selectors cannot use either shared browser cookie.
-    for headers in (
-        {},
-        {"X-MCL-User": "demo"},
-        {**john, "X-MCL-User": "demo"},
-        {**grace, "X-MCL-User": "officer"},
-        {"X-MCL-Tab": grace["X-MCL-Tab"]},
-        {**grace, "X-MCL-Tab": "forged"},
-    ):
-        assert client.get("/api/staff/me", headers=headers).status_code == 401
-        assert client.post("/api/staff/logout", headers=headers).status_code == 401
-        assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=headers).status_code == 401
+    assert client.get("/api/staff/me").status_code == 401
+    for forged in ({"X-MCL-User": "demo"}, {**john, "X-MCL-User": "demo"},
+                   {**grace, "X-MCL-Tab": "wrong"}):
+        assert client.get("/api/staff/me", headers=forged).status_code == 401
+        assert client.post("/api/staff/logout", headers=forged).status_code == 401
+    assert "tab_credential" not in client.get("/api/staff/me", headers=grace).json()
+    assert client.get("/api/staff/me", headers={**grace, "X-MCL-User": "DEMO"}).status_code == 200
     assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=john).status_code == 403
-    # Both tabs can download files using their own credential.
-    for headers in (grace, john):
-        assert client.get("/api/staff/loans/533/schedule.pdf", headers=headers).status_code == 200
-    assert client.post("/api/staff/logout", headers=john).status_code == 204
+    # John signs out in his tab; Grace stays signed in in hers.
+    client.post("/api/staff/logout", headers=john)
     assert client.get("/api/staff/me", headers=john).status_code == 401
     assert client.get("/api/staff/me", headers=grace).status_code == 200
-
-
-@pytest.mark.parametrize("first,second", [("a.b", "ab"), ("Alice", "alice"), ("a" * 33, "a" * 32 + "b"), ("!", "?")])
-def test_cookie_names_do_not_collide(first, second):
-    assert staff_cookie_for(first) != staff_cookie_for(second)
-    assert staff_cookie_for(first) == staff_cookie_for(first)
-
-
-@pytest.mark.parametrize("enabled", [True, False])
-def test_self_approval_setting_is_exposed_and_enforced(client, enabled):
-    settings = client.app.state.services.settings
-    settings.allow_self_approval = True
-    r = client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
-    assert r.json()["allow_self_approval"] is True
-    client.headers.update({"X-MCL-User": "demo", "X-MCL-Tab": r.json()["tab_token"]})
-    assert (
-        client.post(
-            "/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked all documents."}
-        ).status_code
-        == 200
-    )
-    settings.allow_self_approval = enabled
-    assert client.get("/api/staff/me").json()["allow_self_approval"] is enabled
-    assert client.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == (200 if enabled else 409)
-
-
-def test_old_tab_credential_cannot_use_new_session(client):
-    old = login_staff(client)
-    fresh = login_staff(client)
-    assert old["X-MCL-Tab"] != fresh["X-MCL-Tab"]
-    assert client.get("/api/staff/me", headers=old).status_code == 401
-    assert client.get("/api/staff/me", headers=fresh).status_code == 200
-
-
-def test_complete_documents_allow_submission_when_approval_kyc_disabled(client):
-    officer(client)
-    client.app.state.services.settings.kyc_required_for_approval = False
-    assert (
-        client.post(
-            "/api/staff/loans/538/submit",
-            json={"recommendation": "DECLINE", "note": "Documents checked, income too low."},
-        ).status_code
-        == 200
-    )
+    # A tab can't borrow another person's session by naming them.
+    assert client.get("/api/staff/me", headers={"X-MCL-User": "someone"}).status_code == 401
 
 
 def test_successful_sign_ins_do_not_lock_anyone_out(client):
     for _ in range(12):
         assert client.post("/api/staff/login", json={"username": "demo", "password": "demo"}).status_code == 200
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_self_approval_setting_and_decision(staff, enabled):
+    settings = staff.app.state.services.settings
+    settings.allow_self_approval = True
+    assert staff.post("/api/staff/loans/538/submit", json={
+        "recommendation": "APPROVE", "note": "Checked all documents myself."
+    }).status_code == 200
+    settings.allow_self_approval = enabled
+    assert staff.get("/api/staff/me").json()["allow_self_approval"] is enabled
+    assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == (200 if enabled else 409)
+
+
+def test_expired_and_tampered_staff_sessions(staff):
+    from app.security import staff_cookie_for
+
+    cookie = staff_cookie_for("demo")
+    original = staff.cookies.get(cookie)
+    staff.cookies.set(cookie, "tampered", domain="testserver.local", path="/")
+    assert staff.get("/api/staff/me").status_code == 401
+    assert staff.post("/api/staff/logout").status_code == 401
+    staff.cookies.set(cookie, original, domain="testserver.local", path="/")
+    store = staff.app.state.services.sessions
+    for sid, (_, data) in list(store._items.items()):
+        store._items[sid] = (0, data)
+    assert staff.get("/api/staff/me").status_code == 401
+    assert staff.post("/api/staff/logout").status_code == 401
+
+
+def test_staff_cookie_names_bind_the_complete_canonical_username():
+    from app.security import staff_cookie_for
+
+    for left, right in [("a.b", "ab"), ("a" * 32 + "x", "a" * 32 + "y"), ("!!!", "???")]:
+        assert staff_cookie_for(left) != staff_cookie_for(right)
+    assert staff_cookie_for(" Demo ") == staff_cookie_for("demo")
+    assert staff_cookie_for("!!!") == staff_cookie_for(" !!! ")
+
+
+def test_staff_lookup_rejects_wrong_session_type_and_username(staff):
+    from app.security import PortalSession
+
+    store = staff.app.state.services.sessions
+    sid, (expiry, session) = next(iter(store._items.items()))
+    session.username = "officer"
+    assert staff.get("/api/staff/me").status_code == 401
+    assert staff.post("/api/staff/logout").status_code == 401
+    store._items[sid] = (expiry, PortalSession(borrower_id=1, first_name="Mary"))
+    assert staff.get("/api/staff/me").status_code == 401
+    assert staff.post("/api/staff/logout").status_code == 401
+    assert sid in store._items

@@ -124,28 +124,34 @@ export class ApiError extends Error {
   }
 }
 
-// Each tab keeps the credential issued at login; a username alone cannot select a session.
-const TAB_SESSION = 'mcl-staff-session'
-type TabSession = { username: string; token: string }
-let memorySession: TabSession | null = null
+// Which staff member this browser tab is signed in as. Each tab keeps its own (sessionStorage), so a loan
+// officer and a credit manager can work side by side in one browser; the API picks that person's session.
+const TAB_USER = 'mcl-staff-user'
+const TAB_CREDENTIAL = 'mcl-staff-tab'
 
-function tabSession(): TabSession | null {
-  try { return (JSON.parse(sessionStorage.getItem(TAB_SESSION) ?? 'null') as TabSession | null) ?? memorySession }
-  catch { return memorySession }
+export function tabUser(): string | null {
+  try { return sessionStorage.getItem(TAB_USER) } catch { return null }
 }
 
-function setTabSession(session: TabSession | null) {
-  memorySession = session
+export function setTabUser(username: string | null, credential?: string) {
   try {
-    if (session) sessionStorage.setItem(TAB_SESSION, JSON.stringify(session))
-    else sessionStorage.removeItem(TAB_SESSION)
-  } catch { /* Keep this tab's credential in memory when storage is unavailable. */ }
+    if (username && credential) {
+      sessionStorage.setItem(TAB_USER, username)
+      sessionStorage.setItem(TAB_CREDENTIAL, credential)
+    } else {
+      sessionStorage.removeItem(TAB_USER)
+      sessionStorage.removeItem(TAB_CREDENTIAL)
+    }
+  } catch { /* Requests without both stored values are rejected by the API. */ }
 }
 
-/** Headers shared by staff API calls, photos and document downloads. */
+/** Headers for a staff request, naming this tab's person. */
 export function staffHeaders(path: string): Record<string, string> {
-  const session = path.startsWith('/api/staff/') ? tabSession() : null
-  return session ? { 'X-MCL-User': session.username, 'X-MCL-Tab': session.token } : {}
+  const user = path.startsWith('/api/staff') ? tabUser() : null
+  try {
+    const credential = sessionStorage.getItem(TAB_CREDENTIAL)
+    return user && credential ? { 'X-MCL-User': user, 'X-MCL-Tab': credential } : {}
+  } catch { return {} }
 }
 
 async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
@@ -183,13 +189,13 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
 export const api = {
   staff: {
     login: async (username: string, password: string) => {
-      setTabSession(null) // sign in as anyone, whoever this tab was before
-      const { tab_token, ...user } = await request<StaffUser & { tab_token: string }>('POST', '/api/staff/login', { username, password })
-      setTabSession({ username: user.username, token: tab_token })
+      setTabUser(null) // sign in as anyone, whoever this tab was before
+      const user = await request<StaffUser & { tab_credential: string }>('POST', '/api/staff/login', { username, password })
+      setTabUser(user.username, user.tab_credential)
       return user
     },
     logout: async () => {
-      try { await request<void>('POST', '/api/staff/logout') } finally { setTabSession(null) }
+      try { await request<void>('POST', '/api/staff/logout') } finally { setTabUser(null) }
     },
     me: () => request<StaffUser>('GET', '/api/staff/me'),
     dashboard: () => request<Dashboard>('GET', '/api/staff/dashboard'),

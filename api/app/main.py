@@ -77,7 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT"],
-        allow_headers=["Content-Type", "X-MCL-User"],
+        allow_headers=["Content-Type", "X-MCL-User", "X-MCL-Tab"],
     )
 
     @app.middleware("http")
