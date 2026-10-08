@@ -3,8 +3,8 @@
 Sessions live on the server. The browser only gets a random session id in an HttpOnly,
 SameSite=Strict cookie (signed, so a tampered id is rejected before any lookup); the
 staff member's Fineract credential never leaves the server. Sessions, one-time codes and
-rate limits are kept in memory: run a single API worker (a restart signs everyone out),
-or move them to the database before scaling out.
+rate limits here are kept in memory, for the demo and tests; with MCL_DATABASE_URL set, app/store.py keeps
+them in McLender's database instead, so a restart signs nobody out.
 """
 
 from __future__ import annotations

@@ -79,7 +79,11 @@ credit manager testing side by side). Each tab remembers who signed in there and
 - Loans can't be approved until the borrower's KYC documents are on file (`MCL_KYC_REQUIRED`, `MCL_KYC_REQUIRED_FOR_APPROVAL`).
 - Money is `Decimal` in Python and a decimal string in JSON and in the browser. No floating-point maths touches amounts.
 - Caddy sends a strict Content-Security-Policy and other security headers. The API sends `Cache-Control: no-store`. The service worker caches the app shell only, never API answers.
-- Run **one API worker**: SMS codes and rate limits live in memory. Move them to the database before running more than one.
+- Sessions, sign-in codes and lock-outs are kept in McLender's own PostgreSQL database (`mclender`, created by
+  `deploy/mclender-db.sh` on every start), so restarting the API signs nobody out. Session ids are stored only as a
+  hash and their contents encrypted with a key from `MCL_SESSION_SECRET` (changing that secret signs everyone out).
+  Without `MCLENDER_DB_PASSWORD` they stay in memory, as in the demo. Still run one API worker until settings and
+  the audit log move there too (Phase 1).
 
 ## Checking against Fineract
 

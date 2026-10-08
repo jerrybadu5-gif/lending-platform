@@ -12,6 +12,16 @@ jobs:
   api:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: api } }
+    # A real PostgreSQL for McLender's own database (sessions, codes, lock-outs): the store tests run on it too.
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: mclender, POSTGRES_PASSWORD: ci-only-password, POSTGRES_DB: mclender }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mclender" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MCL_TEST_DATABASE_URL: postgresql+psycopg://mclender:ci-only-password@localhost:5432/mclender
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
