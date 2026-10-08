@@ -36,6 +36,7 @@ class StaffUser(BaseModel):
     username: str
     display_name: str
     roles: list[str] = []
+    review_required: bool = True  # approval waits for the loan officer's review (MCL_REVIEW_REQUIRED)
 
 
 class NextOfKin(BaseModel):
@@ -349,6 +350,8 @@ class BorrowerProfile(BaseModel):
 
 class IdSuggestionsOut(BaseModel):
     national_id: str | None = None
+    document_type: Literal["passport", "national_id", "licence"] | None = None
+    document_number: str | None = None
     first_name: str | None = None
     last_name: str | None = None
     date_of_birth: date | None = None

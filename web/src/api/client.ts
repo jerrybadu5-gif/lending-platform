@@ -19,7 +19,7 @@ export const DOCUMENT_LABELS: Record<DocumentKind, string> = {
   receipt: 'Payment receipt',
 }
 
-export interface StaffUser { username: string; display_name: string; roles: string[] }
+export interface StaffUser { username: string; display_name: string; roles: string[]; review_required?: boolean }
 export interface BankAccount { bank: string; branch: string | null; account_name: string; account_number: string }
 export interface NextOfKin { name: string; relationship: string; phone: string }
 export interface Borrower {
@@ -76,7 +76,10 @@ export interface LoanReview {
 }
 export interface IdScan {
   photo: string | null
-  suggestions: { national_id: string | null; first_name: string | null; last_name: string | null; date_of_birth: string | null; gender: Gender | null }
+  suggestions: {
+    national_id: string | null; first_name: string | null; last_name: string | null; date_of_birth: string | null; gender: Gender | null
+    document_type?: 'passport' | 'national_id' | 'licence' | null; document_number?: string | null
+  }
   text_read: boolean; problems: string[]
 }
 export interface Payment { id: number | null; paid_on: string; amount: Money; method: string; reference: string | null }
@@ -121,6 +124,27 @@ export class ApiError extends Error {
   }
 }
 
+// Which staff member this browser tab is signed in as. Each tab keeps its own (sessionStorage), so a loan
+// officer and a credit manager can work side by side in one browser; the API picks that person's session.
+const TAB_USER = 'mcl-staff-user'
+
+export function tabUser(): string | null {
+  try { return sessionStorage.getItem(TAB_USER) } catch { return null }
+}
+
+export function setTabUser(username: string | null) {
+  try {
+    if (username) sessionStorage.setItem(TAB_USER, username)
+    else sessionStorage.removeItem(TAB_USER)
+  } catch { /* private mode without storage: the latest sign-in is used */ }
+}
+
+/** Headers for a staff request, naming this tab's person. */
+export function staffHeaders(path: string): Record<string, string> {
+  const user = path.startsWith('/api/staff') ? tabUser() : null
+  return user ? { 'X-MCL-User': user } : {}
+}
+
 async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
   const form = body instanceof FormData
   let res: Response
@@ -129,7 +153,7 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
       method,
       credentials: 'same-origin',
       // FormData sets its own multipart Content-Type (with the boundary).
-      headers: body === undefined || form ? undefined : { 'Content-Type': 'application/json' },
+      headers: { ...staffHeaders(path), ...(body === undefined || form ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : form ? body : JSON.stringify(body),
     })
   } catch {
@@ -155,8 +179,15 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
 
 export const api = {
   staff: {
-    login: (username: string, password: string) => request<StaffUser>('POST', '/api/staff/login', { username, password }),
-    logout: () => request<void>('POST', '/api/staff/logout'),
+    login: async (username: string, password: string) => {
+      setTabUser(null) // sign in as anyone, whoever this tab was before
+      const user = await request<StaffUser>('POST', '/api/staff/login', { username, password })
+      setTabUser(user.username)
+      return user
+    },
+    logout: async () => {
+      try { await request<void>('POST', '/api/staff/logout') } finally { setTabUser(null) }
+    },
     me: () => request<StaffUser>('GET', '/api/staff/me'),
     dashboard: () => request<Dashboard>('GET', '/api/staff/dashboard'),
     loans: (state?: LoanState) => request<LoanSummary[]>('GET', `/api/staff/loans${state ? `?state=${state}` : ''}`),

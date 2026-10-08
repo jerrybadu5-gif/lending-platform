@@ -90,8 +90,6 @@ def test_loan_officer_cannot_approve(client):
 
 def test_reject_needs_note_and_sends_sms(staff, sms):
     assert staff.post("/api/staff/loans/542/reject", json={"note": ""}).status_code == 422
-    r = staff.post("/api/staff/loans/542/submit", json={"recommendation": "DECLINE", "note": "Can't afford it."})
-    assert r.status_code == 200
     r = staff.post("/api/staff/loans/542/reject", json={"note": "DTI too high"})
     assert r.json()["state"] == "REJECTED"
     assert sms.sent[-1][0] == "74220876"
@@ -196,6 +194,7 @@ def test_officer_reviews_then_manager_decides(client):
 
 
 def test_recommended_amount_cannot_exceed_application(staff):
+    staff.app.state.services.settings.allow_self_approval = True
     r = staff.post(
         "/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "amount": "5000", "note": "Checked it all."}
     )
@@ -207,13 +206,34 @@ def test_review_gate_can_be_turned_off(staff):
     assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).json()["state"] == "APPROVED"
 
 
-def test_manager_cannot_approve_what_they_sent_up(staff):
+def test_credit_manager_decides_and_does_not_send_up(staff):
+    r = staff.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked it all myself."})
+    assert r.status_code == 403 and "credit manager decides" in r.json()["detail"]
+    # A one-manager branch can allow it; even then the same person can't approve what they sent up.
+    staff.app.state.services.settings.allow_self_approval = True
     r = staff.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked it all myself."})
     assert r.json()["review"]["submitted_user"] == "demo"
+    staff.app.state.services.settings.allow_self_approval = False
     r = staff.post("/api/staff/loans/538/approve", json={"amount": "1200"})
     assert r.status_code == 409 and "another credit manager" in r.json()["detail"]
-    staff.app.state.services.settings.allow_self_approval = True
-    assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).json()["state"] == "APPROVED"
+
+
+def test_manager_can_decline_or_send_back_before_the_officer_review(staff):
+    # 538 is still with the loan officer (DRAFT).
+    r = staff.post("/api/staff/loans/538/return", json={"note": "Please get the latest payslip first"})
+    assert r.status_code == 200 and r.json()["review"]["stage"] == "RETURNED"
+    assert r.json()["review"]["returned_note"] == "Please get the latest payslip first"
+    assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == 409
+    r = staff.post("/api/staff/loans/538/reject", json={"note": "Too many loans elsewhere"})
+    assert r.status_code == 200 and r.json()["state"] == "REJECTED"
+
+
+def test_officer_cannot_send_up_without_documents(client):
+    officer(client)
+    # Joyce Ilave (542) has no bank statement or payroll deduction authority: neither advice can go up.
+    for advice in ("APPROVE", "DECLINE"):
+        r = client.post("/api/staff/loans/542/submit", json={"recommendation": advice, "note": "Checked what we have."})
+        assert r.status_code == 409 and "Bank statement" in r.json()["detail"]
 
 
 def test_review_not_set_up_says_so(staff):
@@ -227,5 +247,29 @@ def test_review_not_set_up_says_so(staff):
     backend.get_loan = no_review
     r = staff.post("/api/staff/loans/533/approve", json={"amount": "8000"})
     assert r.status_code == 503 and "dt_loan_review" in r.json()["detail"]
+    staff.app.state.services.settings.allow_self_approval = True
     r = staff.post("/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked it all myself."})
     assert r.status_code == 503
+
+
+def test_two_people_signed_in_in_one_browser(client):
+    # Grace signs in in one tab, John in another: each tab names its person and keeps it.
+    assert client.post("/api/staff/login", json={"username": "demo", "password": "demo"}).status_code == 200
+    assert client.post("/api/staff/login", json={"username": "officer", "password": "officer"}).status_code == 200
+    grace = {"X-MCL-User": "demo"}
+    john = {"X-MCL-User": "officer"}
+    assert client.get("/api/staff/me", headers=grace).json()["display_name"] == "Grace Pokana"
+    assert client.get("/api/staff/me", headers=john).json()["display_name"] == "John Kerema"
+    assert client.get("/api/staff/me").json()["display_name"] == "John Kerema"  # no header: the latest sign-in
+    assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=john).status_code == 403
+    # John signs out in his tab; Grace stays signed in in hers.
+    client.post("/api/staff/logout", headers=john)
+    assert client.get("/api/staff/me", headers=john).status_code == 401
+    assert client.get("/api/staff/me", headers=grace).status_code == 200
+    # A tab can't borrow another person's session by naming them.
+    assert client.get("/api/staff/me", headers={"X-MCL-User": "someone"}).status_code == 401
+
+
+def test_successful_sign_ins_do_not_lock_anyone_out(client):
+    for _ in range(12):
+        assert client.post("/api/staff/login", json={"username": "demo", "password": "demo"}).status_code == 200

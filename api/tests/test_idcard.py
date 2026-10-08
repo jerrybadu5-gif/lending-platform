@@ -37,7 +37,8 @@ def test_reads_a_licence_with_labels_on_their_own_lines():
     s = idcard.parse_card_text(LICENCE)
     assert (s.first_name, s.last_name) == ("Mary", "Kila")
     assert s.date_of_birth == date(1990, 6, 7)  # the earliest adult date, not the expiry
-    assert s.national_id == "88120455"
+    # A licence number is kept as the document number, never offered as the NID.
+    assert s.national_id is None and (s.document_type, s.document_number) == ("licence", "88120455")
 
 
 def test_rubbish_text_suggests_nothing():
@@ -68,7 +69,7 @@ def test_scan_reads_printed_card_and_crops_the_face(monkeypatch):
 
 def test_scan_without_a_face_says_so(monkeypatch):
     monkeypatch.setattr(idcard, "find_face", lambda img: None)
-    monkeypatch.setattr(idcard, "read_text", lambda img: None)
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: None)
     out = idcard.scan(card("x"), "image/png")
     assert out.photo is None and len(out.problems) == 2 and "No face" in out.problems[0]
 
@@ -88,7 +89,7 @@ def test_clean_photo_redraws_as_a_portrait_jpeg():
 
 def test_scan_and_save_photo_through_the_api(staff, monkeypatch):
     monkeypatch.setattr(idcard, "find_face", lambda img: (1060, 300, 180, 220))
-    monkeypatch.setattr(idcard, "read_text", lambda img: PNG_NID)
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: PNG_NID)
     up = staff.post(
         "/api/staff/borrowers/8/documents", data={"kind": "id"}, files={"file": ("nid.png", card("x"), "image/png")}
     ).json()
@@ -121,3 +122,62 @@ def test_huge_pictures_are_refused_before_decoding():
         idcard.scan(buf.getvalue(), "image/png")
     with pytest.raises(idcard.ScanError, match="too large"):
         idcard.clean_photo(buf.getvalue())
+
+
+PASSPORT = """PAPUA NEW GUINEA PASSPORT
+Type P  Code PNG  Passport No. PA1234567
+Surname / Nom
+WAMBI
+P<PNGWAMBI<<PETER<JOHN<<<<<<<<<<<<<<<<<<<<<
+PA12345674PNG8603149M3105057<<<<<<<<<<<<<<02
+"""
+
+
+def test_reads_a_passport_from_its_machine_readable_zone():
+    s = idcard.parse_card_text(PASSPORT)
+    assert (s.first_name, s.last_name) == ("Peter John", "Wambi")
+    assert s.date_of_birth == date(1986, 3, 14) and s.gender == "male"
+    assert (s.document_type, s.document_number, s.national_id) == ("passport", "PA1234567", None)
+
+
+def test_ocr_slips_in_the_code_are_tolerated():
+    noisy = PASSPORT.replace("P<PNGWAMBI", "P«PNG WAMBI").replace("8603149M", "86O3149M")
+    s = idcard.parse_card_text(noisy)
+    assert s.last_name == "Wambi" and s.date_of_birth == date(1986, 3, 14)
+
+
+def _pdf_with_text(text: str) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setFont("Courier", 11)
+    for i, line in enumerate(text.splitlines()):
+        c.drawString(40, 780 - i * 16, line)
+    c.rect(400, 600, 120, 150)
+    c.save()
+    return buf.getvalue()
+
+
+def test_passport_pdf_is_read_from_its_text_layer(monkeypatch):
+    monkeypatch.setattr(idcard, "find_face", lambda img: None)
+    monkeypatch.setattr(idcard, "read_text", lambda img, psm=6: "")  # no OCR needed for a digital PDF
+    out = idcard.scan(_pdf_with_text(PASSPORT), "application/pdf")
+    assert out.suggestions.document_number == "PA1234567" and out.suggestions.last_name == "Wambi"
+    assert out.text_read
+
+
+@pytest.mark.skipif(not shutil.which("tesseract"), reason="Tesseract is not installed")
+def test_scanned_sideways_pdf_is_turned_and_read(monkeypatch):
+    monkeypatch.setattr(idcard, "find_face", lambda img: None)
+    picture = Image.open(io.BytesIO(card(PNG_NID))).rotate(90, expand=True)
+    buf = io.BytesIO()
+    picture.save(buf, "PDF", resolution=150)  # an image-only PDF, like a scanner makes
+    out = idcard.scan(buf.getvalue(), "application/pdf")
+    assert out.suggestions.national_id == "2011 0488 7712" and out.suggestions.last_name == "Wambi"
+
+
+def test_locked_pdf_says_why():
+    with pytest.raises(idcard.ScanError, match="PDF"):
+        idcard.scan(b"%PDF-1.4 not really a pdf", "application/pdf")

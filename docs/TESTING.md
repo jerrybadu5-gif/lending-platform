@@ -46,10 +46,16 @@ Sample data is dated from today, so "due today" always has loans in it. Close an
 - [ ] Joyce Ilave's application can't be approved: it lists the bank statement and payroll deduction authority as missing.
 - [ ] After approving a loan, the pay-out steps appear: the agreement (3 pages, marked DRAFT), "SMS sent to borrower", then upload a signed copy (any PDF), then record the pay-out with a reference. Pay-out isn't possible before the signed copy is uploaded.
 
+**Credit manager is the final say**
+- [ ] As `demo`, open an application John hasn't sent up (Ruth Kaupa or Joyce Ilave). The card is "Decision", with no "Send to credit manager". Approve is greyed out until John sends his review; Reject and "Note to loan officer" work.
+
+**Two people in one browser**
+- [ ] Click "Sign in as someone else (new tab)", sign in there as `officer`. Each tab keeps its own person after reloading.
+
 **Permissions: sign out and sign in as `officer` / `officer` (John Kerema, Loan officer)**
 - [ ] Applications opens on "To review" (Ruth Kaupa and Joyce Ilave). There's no Approve or Reject button anywhere.
 - [ ] On Ruth's application, "Send to credit manager" needs a written assessment. After sending, it shows "With the credit manager".
-- [ ] Joyce's application can't be recommended for approval until her documents are uploaded; a decline can be sent.
+- [ ] Joyce's application can't be sent up, for approval or decline, until her documents are uploaded.
 - [ ] On an approved loan, step 4 says a credit manager pays out.
 
 ## Borrower portal: http://localhost:5173/portal

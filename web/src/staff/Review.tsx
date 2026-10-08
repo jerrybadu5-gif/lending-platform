@@ -32,7 +32,7 @@ function NoteBox({ id, label, value, onChange, placeholder, error }:
 }
 
 /** Loan officer: check the documents and the affordability check, then send it up with a recommendation. */
-export function OfficerReview({ loan, suggested, isApprover }: { loan: LoanDetail; suggested: string; isApprover: boolean }) {
+export function OfficerReview({ loan, suggested }: { loan: LoanDetail; suggested: string }) {
   const refresh = useLoanRefresh(loan.id)
   const qc = useQueryClient()
   const kyc = useQuery({ queryKey: ['kyc', loan.borrower.id], queryFn: () => api.staff.kyc(loan.borrower.id) })
@@ -48,7 +48,9 @@ export function OfficerReview({ loan, suggested, isApprover }: { loan: LoanDetai
   const missing = kyc.data && !kyc.data.complete ? kyc.data.missing : []
   const noteError = note.trim().length < 10 ? 'Write what you checked and why (at least a sentence).' : undefined
   const amountError = advice === 'APPROVE' && parseKina(amount) === null ? 'Enter an amount like 13,000.00' : undefined
-  const blocked = advice === 'APPROVE' && missing.length > 0
+  // The application goes up only with every document on file (the API checks too).
+  const checking = !kyc.data && !kyc.error
+  const blocked = checking || missing.length > 0
 
   function submit(e: FormEvent) {
     e.preventDefault()
@@ -64,7 +66,6 @@ export function OfficerReview({ loan, suggested, isApprover }: { loan: LoanDetai
           <span>{review.returned_note}</span>
         </div>
       )}
-      {isApprover && <p className="m-0 text-[13px] text-ink-muted">A loan officer normally reviews this and sends it to you. You can do it yourself here.</p>}
       {missing.length > 0 && (
         <div className="ml-alert ml-alert-warning flex flex-col gap-1" role="note">
           <strong>Documents still needed</strong>
@@ -88,7 +89,7 @@ export function OfficerReview({ loan, suggested, isApprover }: { loan: LoanDetai
         placeholder="What you checked: ID matches, payslips and bank statement agree, employer confirmed, purpose…" />
       {send.error && <div className="ml-alert ml-alert-danger" role="alert">{(send.error as Error).message}</div>}
       <Button type="submit" variant="primary" disabled={send.isPending || blocked}>{send.isPending ? 'Sending…' : 'Send to credit manager'}</Button>
-      {blocked && <span className="text-[13px] text-ink-muted">Upload the missing documents to recommend approval. A decline can be sent now.</span>}
+      {missing.length > 0 && <span className="text-[13px] text-ink-muted">Upload the missing documents first; the credit manager reviews them with your recommendation.</span>}
     </form>
   )
 }
@@ -109,11 +110,15 @@ export function OfficerSummary({ loan }: { loan: LoanDetail }) {
   )
 }
 
-/** Credit manager: approve, reject or send back, after the officer has sent it up. */
-export function ManagerDecision({ loan, suggested, onDone, username }:
-  { loan: LoanDetail; suggested: string; onDone: (r: ActionResult) => void; username?: string }) {
+/** Credit manager, the final say: approve, reject, or send back to the loan officer with a note. */
+export function ManagerDecision({ loan, suggested, onDone, username, reviewRequired = true }:
+  { loan: LoanDetail; suggested: string; onDone: (r: ActionResult) => void; username?: string; reviewRequired?: boolean }) {
   const qc = useQueryClient()
-  const own = !!username && loan.review?.submitted_user === username
+  const stage = loan.review?.stage ?? 'DRAFT'
+  const submitted = stage === 'SUBMITTED'
+  // Approval waits for the officer's review (MCL_REVIEW_REQUIRED); rejecting or sending back doesn't.
+  const waiting = reviewRequired && !submitted
+  const own = submitted && !!username && loan.review?.submitted_user === username
   const refresh = useLoanRefresh(loan.id)
   const officerAmount = loan.review?.officer_amount ? formatKina(loan.review.officer_amount, { currency: false }) : null
   const [amount, setAmount] = useState(officerAmount ?? suggested)
@@ -123,7 +128,7 @@ export function ManagerDecision({ loan, suggested, onDone, username }:
   const reject = useMutation({ mutationFn: () => api.staff.reject(loan.id, note), onSuccess: onDone })
   const back = useMutation({
     mutationFn: () => api.staff.sendBack(loan.id, note.trim()),
-    onSuccess: (d) => { qc.setQueryData(['loan', loan.id], d); refresh(); onDone({ loan_id: loan.id, state: 'PENDING', message: 'Sent back to the loan officer.' }) },
+    onSuccess: (d) => { qc.setQueryData(['loan', loan.id], d); refresh(); onDone({ loan_id: loan.id, state: 'PENDING', message: 'Sent to the loan officer with your note.' }) },
   })
   const error = approve.error ?? reject.error ?? back.error
   const amountError = parseKina(amount) === null ? 'Enter an amount like 13,000.00' : undefined
@@ -132,6 +137,17 @@ export function ManagerDecision({ loan, suggested, onDone, username }:
   return (
     <div className="flex flex-col gap-4">
       <OfficerSummary loan={loan} />
+      {stage === 'DRAFT' && (
+        <div className="ml-alert ml-alert-warning" role="note">
+          The loan officer hasn't sent his review yet.{waiting ? ' You can approve once he has; you can reject it now, or send it to him with a note.' : ''}
+        </div>
+      )}
+      {stage === 'RETURNED' && loan.review && (
+        <div className="ml-alert ml-alert-warning flex flex-col gap-1" role="note">
+          <strong>With the loan officer: sent back{loan.review.returned_by ? ` by ${loan.review.returned_by}` : ''}{loan.review.returned_on ? ` on ${formatDate(loan.review.returned_on)}` : ''}</strong>
+          <span>{loan.review.returned_note}</span>
+        </div>
+      )}
       {error && <div className="ml-alert ml-alert-danger" role="alert">{(error as Error).message}</div>}
       {own && <div className="ml-alert ml-alert-warning" role="note">You sent this application up yourself, so another credit manager must approve it. You can still send it back or reject it.</div>}
       {!confirm && (
@@ -141,11 +157,11 @@ export function ManagerDecision({ loan, suggested, onDone, username }:
           <NoteBox id="decision-note" label="Note for the file" value={note} onChange={setNote}
             placeholder="Why this decision, for the next person who reads the file" />
           <div className="flex flex-wrap gap-3">
-            <Button variant="primary" disabled={!!amountError || approve.isPending || own} onClick={() => approve.mutate()}>
+            <Button variant="primary" disabled={!!amountError || approve.isPending || own || waiting} onClick={() => approve.mutate()}>
               Approve {parseKina(amount) ? formatKina(parseKina(amount)) : ''}
             </Button>
             <Button variant="danger" onClick={() => setConfirm('reject')}>Reject</Button>
-            <Button variant="quiet" onClick={() => setConfirm('return')}>Send back</Button>
+            <Button variant="quiet" onClick={() => setConfirm('return')}>{submitted ? 'Send back' : 'Note to loan officer'}</Button>
           </div>
         </>
       )}
@@ -162,11 +178,12 @@ export function ManagerDecision({ loan, suggested, onDone, username }:
       )}
       {confirm === 'return' && (
         <div className="flex flex-col gap-3 p-4 rounded-md bg-surface-sunken">
-          <strong>Send back to the loan officer?</strong>
+          <strong>{submitted ? 'Send back to the loan officer?' : 'Send a note to the loan officer?'}</strong>
+          <span className="text-[13px] leading-[18px]">It goes to his "To review" list with your note, and comes back to you when he sends it up again.</span>
           <NoteBox id="return-note" label="What needs doing" value={note} onChange={setNote}
             placeholder="e.g. The payslip is from June; get the latest three." />
           <div className="flex flex-wrap gap-3">
-            <Button variant="primary" disabled={needNote || back.isPending} onClick={() => back.mutate()}>Send back</Button>
+            <Button variant="primary" disabled={needNote || back.isPending} onClick={() => back.mutate()}>Send to loan officer</Button>
             <Button variant="quiet" onClick={() => setConfirm(null)}>Keep reviewing</Button>
           </div>
         </div>

@@ -51,8 +51,9 @@ The API has two back ends behind one interface (`api/app/backends/base.py`):
 |---|---|---|
 | Sign up borrowers, upload and remove documents, read ID cards | Yes | Yes |
 | Take applications, run the affordability check | Yes | Yes |
-| Recommend and send an application for approval | Yes | Yes, but then another credit manager approves it |
-| Approve, reject, send back | No | Only applications sent for approval; never approve one they sent up themselves |
+| Recommend and send an application for approval (all documents on file) | Yes | No (only with `MCL_ALLOW_SELF_APPROVAL=true`) |
+| Approve | No | Once the loan officer has sent it up |
+| Reject, or send to the loan officer with a note | No | At any stage |
 | Pay-out steps 1 to 3 (agreement, contact, signed copy) | Yes | Yes |
 | Record the pay-out | No | Yes |
 | Record repayments | Yes | Yes |
@@ -63,6 +64,10 @@ table `dt_loan_review` (stage, recommendation, amount, note, who and when, and t
 and each step is also written as a loan note. `MCL_REVIEW_REQUIRED=false` turns the send-for-approval step off;
 `MCL_ALLOW_SELF_APPROVAL=true` lets a credit manager approve what they sent up (a branch with one manager and no officer).
 If `dt_loan_review` is missing in Fineract, sending up and deciding are refused with a message saying so.
+
+Staff can be signed in as different people in different tabs of one browser (for example the loan officer and the
+credit manager testing side by side). Each tab remembers who signed in there and the API uses that person's session.
+"Sign in as someone else (new tab)" in the menu opens a tab for a second person.
 
 ## Security
 

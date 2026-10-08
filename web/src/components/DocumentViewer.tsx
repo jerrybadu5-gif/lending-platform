@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { DOCUMENT_LABELS, type BorrowerDocument } from '../api/client'
+import { DOCUMENT_LABELS, staffHeaders, type BorrowerDocument } from '../api/client'
 import { formatDate } from '../lib/format'
 import { DownloadLink } from './DownloadLink'
 import { Button, Field } from './index'
@@ -18,7 +18,7 @@ export function FilePreview({ href, contentType, title, height = 520 }: { href: 
     if (!PREVIEWABLE.has(contentType)) return
     let gone = false
     let made: string | null = null
-    fetch(href, { credentials: 'same-origin' })
+    fetch(href, { credentials: 'same-origin', headers: staffHeaders(href) })
       .then(async (res) => {
         if (!res.ok) throw new Error(res.status === 401 ? 'Your session has ended. Sign in again.' : "This file couldn't be opened.")
         // Re-type the blob from what the server checked at upload, not from the response.

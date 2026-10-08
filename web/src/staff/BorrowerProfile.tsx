@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  api, DOCUMENT_LABELS, files, type BorrowerProfile as Profile, type DocumentKind,
+  api, DOCUMENT_LABELS, files, staffHeaders, type BorrowerProfile as Profile, type DocumentKind,
 } from '../api/client'
 import { Button, DataTable, ErrorNote, Field, Money, Skeleton, StatusPill } from '../components'
 import { formatDate, formatKina, parseKina } from '../lib/format'
@@ -80,13 +80,35 @@ function ProfileView({ p, version }: { p: Profile; version: number }) {
   )
 }
 
+/** The photo fetched as this tab's staff member (an <img src> would go as whoever signed in last). */
+function usePhoto(href: string | null, version: number): string | null {
+  const key = href ? `${href}?v=${version}` : null
+  const [got, setGot] = useState<{ key: string; url: string } | null>(null)
+  useEffect(() => {
+    if (!href || !key) return
+    let gone = false
+    let made: string | null = null
+    fetch(href, { credentials: 'same-origin', headers: staffHeaders(href), cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) return
+        const blob = new Blob([await res.blob()], { type: 'image/jpeg' })
+        if (gone) return
+        made = URL.createObjectURL(blob)
+        setGot({ key, url: made })
+      })
+      .catch(() => { /* no photo shown: initials instead */ })
+    return () => { gone = true; if (made) URL.revokeObjectURL(made) }
+  }, [href, key])
+  return got && got.key === key ? got.url : null
+}
+
 function Portrait({ p, version }: { p: Profile; version: number }) {
   const b = p.borrower
   const initials = b.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()
   const box = 'shrink-0 w-16 h-20 rounded-md border border-line overflow-hidden'
-  // The profile's fetch time changes the URL after a new photo, so the browser doesn't show the old one.
-  return b.has_photo
-    ? <img src={`${files.photo(b.id)}?v=${version}`} alt={`Photo of ${b.name}`} className={`${box} object-cover`} />
+  const src = usePhoto(b.has_photo ? files.photo(b.id) : null, version)
+  return src
+    ? <img src={src} alt={`Photo of ${b.name}`} className={`${box} object-cover`} />
     : <span className={`${box} grid place-items-center bg-surface-sunken text-ink-muted font-semibold`} title="No photo yet: open the ID document and read the card" aria-hidden="true">{initials}</span>
 }
 
@@ -114,6 +136,9 @@ function IdCardReader({ p, docId }: { p: Profile; docId: number }) {
   const rows: [string, string | null | undefined, string | null | undefined][] = s ? [
     ['Name', [s.first_name, s.last_name].filter(Boolean).join(' ') || null, b.name],
     ['NID number', s.national_id, b.national_id],
+    ...(s.document_number && s.document_type !== 'national_id'
+      ? [[s.document_type === 'passport' ? 'Passport number' : "Licence number", s.document_number, null] as [string, string, null]]
+      : []),
     ['Date of birth', s.date_of_birth ? formatDate(s.date_of_birth) : null, b.date_of_birth ? formatDate(b.date_of_birth) : null],
     ['Gender', s.gender ? (s.gender === 'female' ? 'Female' : 'Male') : null, b.gender ? (b.gender === 'female' ? 'Female' : 'Male') : null],
   ] : []

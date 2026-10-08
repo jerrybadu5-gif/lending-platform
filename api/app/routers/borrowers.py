@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -142,6 +142,8 @@ async def scan_id(
         photo="data:image/jpeg;base64," + base64.b64encode(result.photo).decode() if result.photo else None,
         suggestions=IdSuggestionsOut(
             national_id=found.national_id,
+            document_type=cast(Literal["passport", "national_id", "licence"] | None, found.document_type),
+            document_number=found.document_number,
             first_name=found.first_name,
             last_name=found.last_name,
             date_of_birth=found.date_of_birth,

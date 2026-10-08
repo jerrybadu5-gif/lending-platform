@@ -26,11 +26,13 @@ class ScanError(Exception):
 
 @dataclass
 class IdSuggestions:
-    national_id: str | None = None
+    national_id: str | None = None  # only from a national ID card, never a passport or licence number
     first_name: str | None = None
     last_name: str | None = None
     date_of_birth: date | None = None
     gender: str | None = None  # "female" | "male"
+    document_type: str | None = None  # "passport" | "national_id" | "licence" when it can tell
+    document_number: str | None = None  # the passport or licence number
 
 
 @dataclass
@@ -60,31 +62,54 @@ def _open(data: bytes) -> Any:
     return img
 
 
+def pdf_pages(data: bytes, limit: int = 2) -> list[tuple[Any, str]]:
+    """The first pages of a PDF as (RGB image, text layer). A scanned PDF has no text layer (""); a PDF made
+    on a computer has one, which is more accurate than reading the picture."""
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as e:
+        raise ScanError("Reading a PDF needs pypdfium2. Upload a photo of the card instead.") from e
+    out: list[tuple[Any, str]] = []
+    try:
+        pdf = pdfium.PdfDocument(data)
+    except Exception as e:  # damaged, or protected with a password
+        raise ScanError("This PDF couldn't be opened. If it has a password, upload a copy without one.") from e
+    try:
+        for i in range(min(limit, len(pdf))):
+            page = pdf[i]
+            try:
+                # About 3000 px on the long side: a passport page scanned on A4 still has readable text.
+                w, h = page.get_size()
+                scale = min(6.0, 3000 / max(w, h, 1))
+                img = page.render(scale=scale).to_pil().convert("RGB")
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range() or ""
+                finally:
+                    textpage.close()
+            finally:
+                page.close()
+            out.append((img, text))
+    except Exception as e:
+        raise ScanError("This PDF couldn't be read.") from e
+    finally:
+        pdf.close()
+    if not out:
+        raise ScanError("This PDF has no pages.")
+    return out
+
+
 def load_image(data: bytes, content_type: str) -> Any:
     """The card as an RGB PIL image. A PDF is rendered from its first page."""
     from PIL import Image
 
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     if content_type == "application/pdf":
-        try:
-            import pypdfium2 as pdfium
-        except ImportError as e:
-            raise ScanError("Reading a PDF needs pypdfium2. Upload a photo of the card instead.") from e
-        try:
-            pdf = pdfium.PdfDocument(data)
-            page = pdf[0]
-            # Scale so the long side is about 2000 px: enough detail for text and face.
-            w, h = page.get_size()
-            scale = min(4.0, 2000 / max(w, h, 1))
-            img = page.render(scale=scale).to_pil()
-            pdf.close()
-        except Exception as e:  # a damaged or encrypted PDF
-            raise ScanError("This PDF couldn't be opened.") from e
-    else:
-        img = _open(data)
-        from PIL import ImageOps
+        return pdf_pages(data, limit=1)[0][0]
+    img = _open(data)
+    from PIL import ImageOps
 
-        img = ImageOps.exif_transpose(img)  # phone photos are often stored sideways
+    img = ImageOps.exif_transpose(img)  # phone photos are often stored sideways
     return img.convert("RGB")
 
 
@@ -103,7 +128,7 @@ def find_face(img: Any) -> tuple[int, int, int, int] | None:
         grey = cv2.resize(grey, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_AREA)
     grey = cv2.equalizeHist(grey)
     cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    smallest = max(40, int(min(grey.shape) * 0.08))
+    smallest = max(32, int(min(grey.shape) * 0.04))  # a passport photo on an A4 scan is small
     faces = cascade.detectMultiScale(grey, scaleFactor=1.1, minNeighbors=6, minSize=(smallest, smallest))
     if len(faces) == 0:
         return None
@@ -129,7 +154,7 @@ def crop_portrait(img: Any, box: tuple[int, int, int, int]) -> bytes:
     return buf.getvalue()
 
 
-def read_text(img: Any) -> str | None:
+def read_text(img: Any, psm: int = 6) -> str | None:
     """The card's printed text, or None when Tesseract isn't installed."""
     try:
         import pytesseract
@@ -137,15 +162,79 @@ def read_text(img: Any) -> str | None:
         return None
     try:
         grey = img.convert("L")
+        if max(grey.size) > 3000:  # bigger is slower without reading better
+            grey.thumbnail((3000, 3000))
         if max(grey.size) < 1400:  # small photos read better enlarged
             f = 1400 / max(grey.size)
             grey = grey.resize((int(grey.width * f), int(grey.height * f)))
-        return str(pytesseract.image_to_string(grey, config="--psm 6", timeout=20))
+        return str(pytesseract.image_to_string(grey, config=f"--psm {psm}", timeout=25))
     except (pytesseract.TesseractNotFoundError, OSError):
         return None
     except RuntimeError:  # timed out
         log.warning("Reading the ID card text took too long")
         return ""
+
+
+# ----------------------------------------------------------------- passports (machine-readable zone)
+def _mrz_lines(text: str) -> list[str]:
+    """The two (passport) or three (ID card) lines of <<< code at the bottom of the document."""
+    out = []
+    for raw in text.splitlines():
+        line = raw.upper().replace("«", "<").replace(" ", "").replace("‹", "<")
+        line = re.sub(r"[^A-Z0-9<]", "", line)
+        if len(line) >= 28 and line.count("<") >= 2:
+            out.append(line)
+    return out
+
+
+def _mrz_date(yymmdd: str, past: bool = True) -> date | None:
+    digits = yymmdd.replace("O", "0").replace("I", "1")
+    if not re.fullmatch(r"\d{6}", digits):
+        return None
+    yy, mm, dd = int(digits[:2]), int(digits[2:4]), int(digits[4:])
+    century = 2000 if 2000 + yy <= date.today().year else 1900
+    try:
+        return date(century + yy if past else 2000 + yy, mm, dd)
+    except ValueError:
+        return None
+
+
+def _mrz_names(field_: str) -> tuple[str | None, str | None]:
+    surname, _, given = field_.partition("<<")
+    tidy = lambda v: " ".join(w.capitalize() for w in v.replace("<", " ").split()) or None  # noqa: E731
+    return tidy(given), tidy(surname)
+
+
+def parse_mrz(text: str) -> IdSuggestions | None:
+    """Details from a passport's machine-readable zone (ICAO 9303 TD3), or a TD1 ID card's."""
+    lines = _mrz_lines(text)
+    for i in range(len(lines) - 1):
+        a, b = lines[i], lines[i + 1]
+        if a.startswith("P") and len(b) >= 28:  # passport: P<PNGSURNAME<<GIVEN<NAMES / number, dob, sex
+            first, last = _mrz_names(a[5:])
+            number = b[0:9].replace("<", "") or None
+            sex = b[20:21]
+            return IdSuggestions(
+                first_name=first,
+                last_name=last,
+                date_of_birth=_mrz_date(b[13:19]),
+                gender="female" if sex == "F" else "male" if sex == "M" else None,
+                document_type="passport",
+                document_number=number,
+            )
+        if a[:1] in "IAC" and i + 2 < len(lines):  # ID card, three lines
+            c = lines[i + 2]
+            first, last = _mrz_names(c)
+            sex = b[7:8]
+            return IdSuggestions(
+                first_name=first,
+                last_name=last,
+                date_of_birth=_mrz_date(b[0:6]),
+                gender="female" if sex == "F" else "male" if sex == "M" else None,
+                document_type="national_id",
+                document_number=a[5:14].replace("<", "") or None,
+            )
+    return None
 
 
 # ----------------------------------------------------------------- text
@@ -197,6 +286,25 @@ def parse_date(value: str) -> date | None:
 def parse_card_text(text: str) -> IdSuggestions:
     """Best guesses from an ID card's text (PNG NID card, driver's licence or passport). Every value is a
     suggestion for staff to check, never written without them."""
+    found = _parse_labels(text)
+    mrz = parse_mrz(text)
+    if mrz:  # the machine-readable zone is the most reliable; printed labels fill any gaps
+        for k, v in vars(found).items():
+            if getattr(mrz, k) is None and k != "national_id":
+                setattr(mrz, k, v)
+        return mrz
+    if re.search(r"\bpassport\b", text, re.I):
+        found.document_type = "passport"
+        found.document_number, found.national_id = found.national_id, None
+    elif re.search(r"\b(driver|driving|licen[cs]e)\b", text, re.I):
+        found.document_type = "licence"
+        found.document_number, found.national_id = found.national_id, None
+    elif found.national_id:
+        found.document_type = "national_id"
+    return found
+
+
+def _parse_labels(text: str) -> IdSuggestions:
     out = IdSuggestions()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     for i, line in enumerate(lines):
@@ -255,24 +363,72 @@ def clean_photo(data: bytes) -> bytes:
 
 
 # ----------------------------------------------------------------- scan
+def _score(s: IdSuggestions) -> int:
+    return sum(v is not None for v in vars(s).values())
+
+
+def _read(img: Any, pdf_text: str = "", layouts: tuple[int, ...] = (6, 11)) -> tuple[IdSuggestions, bool]:
+    """The best reading of one page: its PDF text layer if it has one, else OCR in two layouts. Returns
+    (suggestions, whether text reading is installed)."""
+    best = parse_card_text(pdf_text) if pdf_text.strip() else IdSuggestions()
+    if _score(best) >= 4:
+        return best, True
+    available = True
+    for psm in layouts:  # 6: a block of text (labels, the passport code); 11: scattered words on a card
+        text = read_text(img, psm)
+        if text is None:
+            available = False
+            break
+        found = parse_card_text(text)
+        if _score(found) > _score(best):
+            best = found
+        if _score(best) >= 4:
+            break
+    return best, available
+
+
+def _turns(img: Any) -> list[Any]:
+    return [img, img.rotate(90, expand=True), img.rotate(270, expand=True), img.rotate(180, expand=True)]
+
+
 def scan(data: bytes, content_type: str) -> IdScan:
     out = IdScan()
-    img = load_image(data, content_type)
-    try:
-        box = find_face(img)
-    except ImportError:
-        box = None
+    pdf = content_type == "application/pdf"
+    pages = pdf_pages(data) if pdf else [(load_image(data, content_type), "")]
+
+    face_ok = True
+    text_ok = True
+    best = IdSuggestions()
+    for img, pdf_text in pages:
+        # A scan is often sideways or upside down: try each way round until the face and the text are found.
+        for turned in _turns(img):
+            if out.photo is None and face_ok:
+                try:
+                    box = find_face(turned)
+                except ImportError:
+                    face_ok = False
+                    box = None
+                if box:
+                    out.photo = crop_portrait(turned, box)
+            if _score(best) < 4 and text_ok:
+                upright = turned is img
+                found, text_ok = _read(turned, pdf_text if upright else "", (6, 11) if upright else (6,))
+                if _score(found) > _score(best):
+                    best = found
+            if out.photo is not None and (_score(best) >= 4 or not text_ok):
+                break
+        if out.photo is not None and _score(best) >= 4:
+            break
+
+    if not face_ok:
         out.problems.append("Face finding isn't installed on this server (opencv-python-headless).")
-    if box:
-        out.photo = crop_portrait(img, box)
-    elif not out.problems:
-        out.problems.append("No face was found on this document. Use a clear, straight photo of the card's front.")
-    text = read_text(img)
-    if text is None:
+    elif out.photo is None:
+        out.problems.append("No face was found. Use a clear, straight scan or photo of the page with the photo.")
+    if not text_ok and _score(best) == 0:
         out.problems.append("Text reading isn't installed on this server (Tesseract), so no details were read.")
     else:
-        out.suggestions = parse_card_text(text)
-        out.text_read = any(vars(out.suggestions).values())
+        out.suggestions = best
+        out.text_read = _score(best) > 0
         if not out.text_read:
-            out.problems.append("No details could be read from the card. Type them in from the card.")
+            out.problems.append("No details could be read. Type them in from the document.")
     return out

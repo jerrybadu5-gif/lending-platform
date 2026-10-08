@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from collections import defaultdict, deque
@@ -24,6 +25,16 @@ from .config import Settings
 
 STAFF_COOKIE = "mcl_staff"
 PORTAL_COOKIE = "mcl_portal"
+# Staff may be signed in as different people in different tabs of one browser (a loan officer and a credit
+# manager testing together, or a manager covering for someone). Each person gets their own cookie,
+# mcl_staff_<username>, and each tab says whose it is with this header. The plain mcl_staff cookie is the latest
+# sign-in, used by a request without the header (a link opened outside the app).
+STAFF_USER_HEADER = "X-MCL-User"
+
+
+def staff_cookie_for(username: str) -> str:
+    slug = re.sub(r"[^a-z0-9]", "", username.lower())[:32]
+    return f"{STAFF_COOKIE}_{slug or hashlib.sha256(username.encode()).hexdigest()[:16]}"
 
 
 @dataclass
@@ -79,8 +90,7 @@ def _services(request: Request) -> Any:
     return request.app.state.services
 
 
-def start_session(response: Response, svc: Any, cookie: str, data: StaffSession | PortalSession) -> None:
-    sid = svc.sessions.create(data)
+def _set_cookie(response: Response, svc: Any, cookie: str, sid: str) -> None:
     response.set_cookie(
         cookie,
         _signer(svc.settings, cookie).dumps(sid),
@@ -90,6 +100,13 @@ def start_session(response: Response, svc: Any, cookie: str, data: StaffSession 
         samesite="strict",
         path="/",
     )
+
+
+def start_session(response: Response, svc: Any, cookie: str, data: StaffSession | PortalSession) -> None:
+    sid = svc.sessions.create(data)
+    _set_cookie(response, svc, cookie, sid)
+    if isinstance(data, StaffSession):
+        _set_cookie(response, svc, staff_cookie_for(data.username), sid)
 
 
 def _session_id(request: Request, settings: Settings, cookie: str) -> str | None:
@@ -102,7 +119,25 @@ def _session_id(request: Request, settings: Settings, cookie: str) -> str | None
         return None
 
 
+def _staff_cookie(request: Request) -> str:
+    """The cookie for the person this tab is signed in as, or the latest sign-in."""
+    user = request.headers.get(STAFF_USER_HEADER, "").strip()
+    return staff_cookie_for(user) if user else STAFF_COOKIE
+
+
 def end_session(request: Request, response: Response, svc: Any, cookie: str) -> None:
+    if cookie == STAFF_COOKIE:
+        mine = _staff_cookie(request)
+        sid = _session_id(request, svc.settings, mine)
+        data = svc.sessions.get(sid) if sid else None
+        if sid:
+            svc.sessions.delete(sid)
+        response.delete_cookie(mine, path="/")
+        if isinstance(data, StaffSession):
+            response.delete_cookie(staff_cookie_for(data.username), path="/")
+        if _session_id(request, svc.settings, STAFF_COOKIE) in (sid, None):
+            response.delete_cookie(STAFF_COOKIE, path="/")
+        return
     sid = _session_id(request, svc.settings, cookie)
     if sid:
         svc.sessions.delete(sid)
@@ -116,8 +151,9 @@ def _lookup(request: Request, svc: Any, cookie: str, kind: type) -> Any | None:
 
 
 def staff_session(request: Request, svc: Any = Depends(_services)) -> StaffSession:
-    data = _lookup(request, svc, STAFF_COOKIE, StaffSession)
-    if data is None:
+    data = _lookup(request, svc, _staff_cookie(request), StaffSession)
+    user = request.headers.get(STAFF_USER_HEADER, "").strip()
+    if data is None or (user and data.username.lower() != user.lower()):
         raise HTTPException(401, "Please sign in.")
     return data
 
@@ -178,3 +214,7 @@ class RateLimiter:
         if len(q) >= self.limit:
             raise HTTPException(429, "Too many attempts. Wait a few minutes and try again.")
         q.append(now)
+
+    def reset(self, key: str) -> None:
+        """Forget a key's hits (after a successful sign-in, so only failed attempts add up)."""
+        self._hits.pop(key, None)
