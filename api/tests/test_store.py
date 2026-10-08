@@ -35,9 +35,12 @@ def db(request, tmp_path):
 
 def test_staff_stay_signed_in_across_a_restart(db):
     with TestClient(app_on(db)) as first:
-        assert first.post("/api/staff/login", json={"username": "demo", "password": "demo"}).status_code == 200
+        login = first.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+        assert login.status_code == 200
         cookies = dict(first.cookies)
-    with TestClient(app_on(db), cookies=cookies) as second:  # the API restarted; the browser kept its cookie
+        headers = {"X-MCL-User": login.json()["username"], "X-MCL-Tab": login.json()["tab_token"]}
+    # The browser retains its cookie and tab credential across an API restart.
+    with TestClient(app_on(db), cookies=cookies, headers=headers) as second:
         r = second.get("/api/staff/me")
         assert r.status_code == 200 and r.json()["display_name"] == "Grace Pokana"
         second.post("/api/staff/logout")
