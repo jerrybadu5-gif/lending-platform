@@ -84,6 +84,10 @@ Use **accrual (periodic)** accounting if you report on an accrual basis, otherwi
   give the staff roles READ, CREATE and UPDATE on any new data table (Admin → Users → Roles → the role → Edit,
   "datatable" group). `deploy/setup-test.py` does both on a test server. Until `dt_loan_review` exists, McLender
   refuses to send applications for approval or decide them, with a message saying so.
+- **McLender's own database** (from v0.2): set `MCLENDER_DB_PASSWORD` in `deploy/.env` (letters and digits;
+  `deploy/setup-test.py` sets one on a test PC), then `docker compose up -d`. The `mclender-db-init` step creates
+  the `mclender` database and user, and the API builds its tables on start-up. Sign-ins then survive restarts.
+  `deploy/backup.ps1` backs it up with the Fineract databases.
 
 ## 7. Loan workflow *(brief: state machine)*
 

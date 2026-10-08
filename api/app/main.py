@@ -15,8 +15,9 @@ from .backends.base import BackendError, LendingBackend
 from .config import Settings, get_settings
 from .deps import Services
 from .routers import borrowers, documents, payout, portal, staff
-from .security import OtpStore, RateLimiter, SessionStore
+from .security import OtpStore, PortalSession, RateLimiter, SessionStore, StaffSession
 from .sms import make_sms
+from .store import DbOtpStore, DbRateLimiter, DbSessionStore, make_engine, migrate, usable_url
 from .underwriting import load_policy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -61,10 +62,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             otp_limit=RateLimiter(5, 900),
             sessions=SessionStore(settings.session_hours),
         )
+        engine = None
+        if usable_url(settings.database_url):
+            engine = make_engine(settings.database_url)
+            migrate(engine)
+            kinds = {"staff": StaffSession, "portal": PortalSession}
+            svc.sessions = DbSessionStore(engine, settings.session_hours, settings.session_secret, kinds)
+            svc.otp = DbOtpStore(engine, settings.otp_ttl_seconds, settings.otp_max_attempts)
+            svc.login_limit = DbRateLimiter(engine, 10, 300, "login")
+            svc.otp_limit = DbRateLimiter(engine, 5, 900, "otp")
+            svc.resend_limit = DbRateLimiter(engine, 2, 600, "resend")
+        elif settings.backend == "fineract":
+            logging.getLogger("mclender").warning(
+                "No McLender database (MCL_DATABASE_URL): sign-ins are kept in memory and lost when the API restarts."
+            )
         svc.backend = make_backend(settings, svc.today())
         app.state.services = svc
         yield
         await svc.backend.aclose()
+        if engine is not None:
+            engine.dispose()
 
     app = FastAPI(
         title="McLender API",

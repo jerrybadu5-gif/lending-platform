@@ -29,8 +29,7 @@ def client():
 
 @pytest.fixture
 def staff(client):
-    r = client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
-    assert r.status_code == 200, r.text
+    login_staff(client)
     return client
 
 

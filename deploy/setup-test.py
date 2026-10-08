@@ -138,6 +138,11 @@ def main() -> None:
         set_env_value("MCL_FINERACT_PORTAL_PASSWORD", portal_pw)
         print("! MCL_FINERACT_PORTAL_PASSWORD in deploy/.env was too weak for Fineract; it now has a new,")
         print("  strong one. Restart the API afterwards: cd deploy; docker compose up -d mclender-api")
+    if env.get("MCLENDER_DB_PASSWORD", "").startswith("change-me") or not env.get("MCLENDER_DB_PASSWORD"):
+        # McLender's own database (sign-ins survive a restart). Letters and digits only: it goes in a URL.
+        set_env_value("MCLENDER_DB_PASSWORD", secrets.token_hex(24))
+        print("! deploy/.env had no MCLENDER_DB_PASSWORD; one has been set. Start the McLender database with:")
+        print("  cd deploy; docker compose up -d")
     try:
         f.get("/offices")
     except FineractError as e:

@@ -277,6 +277,8 @@ def test_two_people_signed_in_in_one_browser(client):
     assert "tab_credential" not in client.get("/api/staff/me", headers=grace).json()
     assert client.get("/api/staff/me", headers={**grace, "X-MCL-User": "DEMO"}).status_code == 200
     assert client.post("/api/staff/loans/533/approve", json={"amount": "8000"}, headers=john).status_code == 403
+    for headers in (grace, john):
+        assert client.get("/api/staff/loans/533/schedule.pdf", headers=headers).status_code == 200
     # John signs out in his tab; Grace stays signed in in hers.
     client.post("/api/staff/logout", headers=john)
     assert client.get("/api/staff/me", headers=john).status_code == 401
