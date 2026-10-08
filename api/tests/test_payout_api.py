@@ -2,6 +2,8 @@
 
 import re
 
+from conftest import login_staff
+
 SIGNED = {"file": ("signed agreement.pdf", b"%PDF-1.4 signed", "application/pdf")}
 
 
@@ -77,7 +79,7 @@ def test_signed_agreement_rule_can_be_turned_off(staff):
 
 
 def test_loan_officer_cannot_pay_out(client):
-    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    login_staff(client, "officer")
     assert client.post("/api/staff/loans/536/disburse", json={"reference": "X1"}).status_code == 403
 
 
@@ -149,7 +151,7 @@ def test_without_sms_provider_staff_are_told_to_phone(staff, sms):
 def test_loan_officer_can_log_contact_and_upload_signed_copy(client, staff):
     approve_peter(staff)
     staff.post("/api/staff/logout")
-    client.post("/api/staff/login", json={"username": "officer", "password": "officer"})
+    login_staff(client, "officer")
     assert client.post("/api/staff/loans/536/contact", json={"channel": "phone", "note": "ok"}).status_code == 201
     assert client.post("/api/staff/loans/536/signed-agreement", files=SIGNED).status_code == 201
 

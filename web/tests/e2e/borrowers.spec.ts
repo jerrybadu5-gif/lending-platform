@@ -49,18 +49,27 @@ test('sign up a borrower, upload KYC documents, take an application and approve 
   await page.getByLabel('Amount (PGK)').fill('3000')
   await page.getByRole('button', { name: 'Save application' }).click()
   await expect(page.getByRole('heading', { name: 'Kila Morea' })).toBeVisible()
+  // The credit manager decides, but approval waits for the loan officer's review. No "send to credit manager" for her.
+  await expect(page.getByRole('heading', { name: 'Decision' })).toBeVisible()
+  await expect(page.getByText(/The loan officer hasn't sent his review yet/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send to credit manager' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^Approve/ })).toBeDisabled()
+
+  // The loan officer can't send it up until every document is on file.
+  const loanUrl = page.url()
+  await signInAs(page, 'officer')
+  await page.goto(loanUrl)
   await expect(page.getByText('Documents still needed', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send to credit manager' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Decline' }).click()
+  await expect(page.getByRole('button', { name: 'Send to credit manager' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Approve', exact: true }).click()
 
   await page.getByRole('link', { name: "Upload them on the borrower's profile" }).click()
   for (const kind of ['payslip', 'bank_statement', 'deduction_authority']) {
     await page.getByTestId(`upload-${kind}`).setInputFiles(PDF)
   }
   await expect(page.getByText('Documents complete')).toBeVisible()
-  await page.getByRole('link', { name: /^LN-/ }).first().click()
-  // The loan officer sends it up; a credit manager can't approve what they sent themselves.
-  const loanUrl = page.url()
-  await signInAs(page, 'officer')
   await page.goto(loanUrl)
   await page.getByLabel('Your assessment').fill('All four documents checked against the originals.')
   await page.getByRole('button', { name: 'Send to credit manager' }).click()
@@ -73,8 +82,10 @@ test('sign up a borrower, upload KYC documents, take an application and approve 
 
   const agreement = page.getByRole('link', { name: 'Loan agreement (PDF)' })
   await expect(agreement).toBeVisible()
-  const res = await page.request.get((await agreement.getAttribute('href'))!)
-  expect(res.headers()['content-type']).toBe('application/pdf')
+  const href = (await agreement.getAttribute('href'))!
+  const response = page.waitForResponse((res) => res.url().endsWith(href))
+  await agreement.click()
+  expect((await response).headers()['content-type']).toBe('application/pdf')
 })
 
 test('find a borrower by NID number', async ({ page }) => {

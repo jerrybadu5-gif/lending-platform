@@ -72,8 +72,10 @@ test('record a mobile money repayment', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Print receipt (PDF)' })).toBeVisible()
   const listed = page.getByRole('region', { name: 'Receipts recorded' })
   await expect(listed.getByText('Mary Kila')).toBeVisible()
-  const res = await page.request.get((await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!)
-  expect(res.headers()['content-type']).toBe('application/pdf')
+  const href = (await listed.getByRole('link', { name: 'Print receipt' }).getAttribute('href'))!
+  const response = page.waitForResponse((res) => res.url().endsWith(href))
+  await listed.getByRole('link', { name: 'Print receipt' }).click()
+  expect((await response).headers()['content-type']).toBe('application/pdf')
 })
 
 
@@ -92,4 +94,29 @@ test('loan officer reviews and sends up; cannot approve', async ({ page }) => {
   await page.getByRole('button', { name: 'Send to credit manager' }).click()
   await expect(page.getByRole('heading', { name: 'With the credit manager' })).toBeVisible()
   await expect(page.getByText(/Loan officer recommends approving/)).toBeVisible()
+})
+
+
+test('credit manager and loan officer signed in side by side in one browser', async ({ page, context }) => {
+  // This tab is Grace (credit manager). A second tab signs in as John and stays John.
+  const john = await context.newPage()
+  await john.goto('/staff/login')
+  await john.getByLabel('Username').fill('officer')
+  await john.getByLabel('Password').fill('officer')
+  await john.getByRole('button', { name: 'Sign in' }).click()
+  await expect(john.getByText('John Kerema').first()).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByText('Grace Pokana').first()).toBeVisible()
+  await john.reload()
+  await expect(john.getByText('John Kerema').first()).toBeVisible()
+
+  // Grace asks John for more on an application he hasn't sent up yet; it lands in his list with her note.
+  await page.goto('/staff/loans/542')
+  await page.getByRole('button', { name: 'Note to loan officer' }).click()
+  await page.getByLabel('What needs doing').fill('Please get her bank statement first')
+  await page.getByRole('button', { name: 'Send to loan officer' }).click()
+  await expect(page.getByRole('status')).toContainText('Sent to the loan officer')
+  await john.goto('/staff/loans/542')
+  await expect(john.getByRole('note').getByText('Please get her bank statement first')).toBeVisible()
 })

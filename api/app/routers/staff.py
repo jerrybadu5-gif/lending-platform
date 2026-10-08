@@ -43,6 +43,10 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class StaffLogin(StaffUser):
+    tab_token: str
+
+
 def is_approver(s: StaffSession) -> bool:
     return bool(APPROVER_ROLES & {r.lower() for r in s.roles})
 
@@ -72,17 +76,22 @@ def _require_submitted(svc: Services, loan: LoanDetail, s: StaffSession | None =
         )
 
 
-@router.post("/login", response_model=StaffUser)
+@router.post("/login", response_model=StaffLogin)
 async def login(body: LoginIn, request: Request, response: Response, svc: Services = Depends(services)):
-    svc.login_limit.check(f"{request.client.host if request.client else '-'}:{body.username.lower()}")
+    key = f"{request.client.host if request.client else '-'}:{body.username.lower()}"
+    svc.login_limit.check(key)
     user, cred = await svc.backend.authenticate(body.username, body.password)
-    start_session(
-        response,
-        svc,
-        STAFF_COOKIE,
-        StaffSession(username=user.username, display_name=user.display_name, roles=user.roles, cred=cred),
+    svc.login_limit.reset(key)  # only failed attempts count towards the limit
+    session = StaffSession(username=user.username, display_name=user.display_name, roles=user.roles, cred=cred)
+    start_session(response, svc, STAFF_COOKIE, session)
+    return StaffLogin(
+        username=user.username,
+        display_name=user.display_name,
+        roles=user.roles,
+        review_required=svc.settings.review_required,
+        allow_self_approval=svc.settings.allow_self_approval,
+        tab_token=session.tab_token,
     )
-    return user
 
 
 @router.post("/logout", status_code=204)
@@ -91,8 +100,14 @@ async def logout(request: Request, response: Response, svc: Services = Depends(s
 
 
 @router.get("/me", response_model=StaffUser)
-async def me(s: StaffSession = Depends(staff_session)):
-    return StaffUser(username=s.username, display_name=s.display_name, roles=s.roles)
+async def me(s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
+    return StaffUser(
+        username=s.username,
+        display_name=s.display_name,
+        roles=s.roles,
+        review_required=svc.settings.review_required,
+        allow_self_approval=svc.settings.allow_self_approval,
+    )
 
 
 @router.get("/dashboard", response_model=Dashboard)
@@ -154,11 +169,12 @@ async def approve(
     return result
 
 
-async def _require_kyc(svc: Services, cred: str, loan_id: int) -> LoanDetail:
+async def _require_kyc(svc: Services, cred: str, loan_id: int, *, submission: bool = False) -> LoanDetail:
     """Approval and payout both need the borrower's KYC documents on file (a loan may have been approved
-    elsewhere, e.g. in Mifos X or before this check existed). Returns the loan, so callers needn't load it again."""
+    elsewhere, e.g. in Mifos X or before this check existed). Submission always requires documents,
+    regardless of the approval setting. Returns the loan, so callers needn't load it again."""
     detail = await svc.backend.get_loan(cred, loan_id, svc.today())
-    if not svc.settings.kyc_required_for_approval:
+    if not submission and not svc.settings.kyc_required_for_approval:
         return detail
     kyc = await borrower_kyc(svc, cred, detail.borrower.id)
     if not kyc.complete:
@@ -171,7 +187,10 @@ async def reject(
     loan_id: int, body: RejectIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
     _require_approver(s)
-    _require_submitted(svc, await svc.backend.get_loan(s.cred, loan_id, svc.today()))
+    # The credit manager has the final say: an application can be declined at any stage, with a reason.
+    loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    if loan.state != "PENDING":
+        raise HTTPException(409, "Only an application waiting for a decision can be rejected.")
     result = await svc.backend.reject(s.cred, loan_id, body, svc.today())
     if result.state != "REJECTED":  # waiting for a second approver (maker-checker): tell no one yet
         return result
@@ -191,11 +210,11 @@ async def submit(
 ):
     """The loan officer's part: documents checked, assessment done, recommendation written. Sends it to the
     credit manager's queue."""
-    # Documents must be complete to recommend approval; a decline can go up without them.
-    if body.recommendation == "APPROVE":
-        loan = await _require_kyc(svc, s.cred, loan_id)
-    else:
-        loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
+    if is_approver(s) and not svc.settings.allow_self_approval:
+        # The credit manager decides (approve, reject, or send back for more work); sending up is the officer's step.
+        raise HTTPException(403, "A credit manager decides applications. Approve, reject, or send it back instead.")
+    # The officer sends an application up only with the borrower's documents complete.
+    loan = await _require_kyc(svc, s.cred, loan_id, submission=True)
     if loan.state != "PENDING":
         raise HTTPException(409, "Only an application waiting for a decision can be sent for approval.")
     prior = loan.review
@@ -235,11 +254,14 @@ async def submit(
 async def send_back(
     loan_id: int, body: ReturnIn, s: StaffSession = Depends(staff_session), svc: Services = Depends(services)
 ):
-    """The credit manager sends an application back to the officer with what's missing."""
+    """The credit manager asks the loan officer for more work, with a note. Works whether or not the officer
+    has sent it up yet (e.g. to ask for a document before the officer's review)."""
     _require_approver(s)
     loan = await svc.backend.get_loan(s.cred, loan_id, svc.today())
-    if loan.state != "PENDING" or not loan.review or loan.review.stage != "SUBMITTED":
-        raise HTTPException(409, "Only an application sent for approval can be sent back.")
+    if loan.state != "PENDING":
+        raise HTTPException(409, "Only an application waiting for a decision can be sent back.")
+    if loan.review is None:
+        raise HTTPException(503, REVIEW_NOT_SET_UP)
     today = svc.today()
     note = body.note.strip()
     review = loan.review.model_copy(

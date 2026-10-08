@@ -1,5 +1,7 @@
 import re
 
+from conftest import login_staff
+
 
 def login(client, sms, phone="+675 7012 3344"):
     r = client.post("/api/portal/otp", json={"phone": phone})
@@ -78,7 +80,7 @@ def test_apply_creates_assessed_pending_loan(client, sms):
     assert r.status_code == 201, r.text
     ref = r.json()["ref"]
     assert "application" in sms.sent[-1][1]
-    client.post("/api/staff/login", json={"username": "demo", "password": "demo"})
+    login_staff(client)
     pending = client.get("/api/staff/loans", params={"state": "PENDING"}).json()
     mine = next(p for p in pending if p["ref"] == ref)
     assert mine["recommendation"] in {"APPROVE", "REFER", "DECLINE"}

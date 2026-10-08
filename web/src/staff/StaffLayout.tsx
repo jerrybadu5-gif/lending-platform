@@ -50,6 +50,8 @@ export function StaffLayout() {
         <div className="mt-auto px-3 flex flex-col gap-2 text-[13px] leading-[18px] text-ink-muted">
           <span>{me.data.display_name}<br />{me.data.roles.join(', ')}</span>
           <Button size="sm" variant="quiet" className="self-start" onClick={signOut}>Sign out</Button>
+          {/* A new tab starts without this tab's sign-in, so a second person can sign in there. */}
+          <a href="/staff/login" target="_blank" rel="noopener" className="text-[12px]">Sign in as someone else (new tab)</a>
         </div>
       </aside>
       <main className="flex flex-col gap-6 p-8 box-border" style={{ flex: '999 1 560px', minWidth: 0, maxWidth: 1200 }}>

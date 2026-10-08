@@ -181,21 +181,26 @@ function Decision({ loan }: { loan: LoanDetail }) {
   const stage = loan.review?.stage ?? 'DRAFT'
   const qc = useQueryClient()
   const reassess = useMutation({ mutationFn: () => api.staff.assess(loan.id), onSuccess: (d) => qc.setQueryData(['loan', loan.id], d) })
+  // The credit manager always decides; the loan officer reviews until he has sent it up.
   const title = loan.state !== 'PENDING' ? 'Next step'
-    : stage === 'SUBMITTED' ? (isApprover ? 'Decision' : 'With the credit manager') : 'Your review'
+    : isApprover ? 'Decision' : stage === 'SUBMITTED' ? 'With the credit manager' : 'Your review'
 
   return (
     <section className="ml-card flex flex-col gap-4" aria-label="Decision">
       <h2 className="ml-h2">{title}</h2>
       {result && <div role="status" className="ml-alert" style={{ background: 'var(--surface-sunken)', color: 'var(--ink)' }}>{result.message}</div>}
 
-      {loan.state === 'PENDING' && stage !== 'SUBMITTED' && <OfficerReview loan={loan} suggested={suggestedAmount(loan)} isApprover={isApprover} />}
-      {loan.state === 'PENDING' && stage === 'SUBMITTED' && (isApprover
-        ? <ManagerDecision loan={loan} suggested={suggestedAmount(loan)} onDone={done} username={me?.username} />
-        : <>
-            <OfficerSummary loan={loan} />
-            <p className="m-0 text-[13px] text-ink-muted">Waiting for a credit manager to approve, reject or send it back to you.</p>
-          </>)}
+      {loan.state === 'PENDING' && !me && <Skeleton h={160} />}
+      {loan.state === 'PENDING' && me && isApprover && (
+        <ManagerDecision key={`${loan.id}:${stage}:${loan.review?.officer_amount}`} loan={loan} suggested={suggestedAmount(loan)} onDone={done} username={me.username} reviewRequired={me.review_required ?? true} allowSelfApproval={me.allow_self_approval ?? false} />
+      )}
+      {loan.state === 'PENDING' && me && !isApprover && stage !== 'SUBMITTED' && <OfficerReview loan={loan} suggested={suggestedAmount(loan)} />}
+      {loan.state === 'PENDING' && me && !isApprover && stage === 'SUBMITTED' && (
+        <>
+          <OfficerSummary loan={loan} />
+          <p className="m-0 text-[13px] text-ink-muted">Waiting for a credit manager to approve, reject or send it back to you.</p>
+        </>
+      )}
       {loan.state === 'PENDING' && (
         <Button variant="quiet" className="self-start" disabled={reassess.isPending} onClick={() => reassess.mutate()}>Run the affordability check again</Button>
       )}

@@ -1,4 +1,5 @@
 import { useState, type MouseEvent, type ReactNode } from 'react'
+import { staffHeaders } from '../api/client'
 
 /** File name from a Content-Disposition header (prefers the UTF-8 form). */
 export function fileNameFrom(header: string | null): string | null {
@@ -14,7 +15,7 @@ export function fileNameFrom(header: string | null): string | null {
 /**
  * A download link that fetches the file first, so a refused download (session ended, document
  * missing, loan not approved yet) shows its message instead of saving the error as a file.
- * The href stays real, so the link still works with a middle click or without JavaScript.
+ * Staff downloads need this click handler to attach the tab credential.
  */
 export function DownloadLink({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
   const [busy, setBusy] = useState(false)
@@ -25,7 +26,7 @@ export function DownloadLink({ href, children, className }: { href: string; chil
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(href, { credentials: 'same-origin' })
+      const res = await fetch(href, { credentials: 'same-origin', headers: staffHeaders(href) })
       if (!res.ok) {
         let msg = res.status === 401 ? 'Your session has ended. Sign in again, then try.' : "This file couldn't be downloaded. Try again."
         if (res.status !== 401) {

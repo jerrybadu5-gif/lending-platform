@@ -19,7 +19,7 @@ export const DOCUMENT_LABELS: Record<DocumentKind, string> = {
   receipt: 'Payment receipt',
 }
 
-export interface StaffUser { username: string; display_name: string; roles: string[] }
+export interface StaffUser { username: string; display_name: string; roles: string[]; review_required?: boolean; allow_self_approval?: boolean }
 export interface BankAccount { bank: string; branch: string | null; account_name: string; account_number: string }
 export interface NextOfKin { name: string; relationship: string; phone: string }
 export interface Borrower {
@@ -76,7 +76,10 @@ export interface LoanReview {
 }
 export interface IdScan {
   photo: string | null
-  suggestions: { national_id: string | null; first_name: string | null; last_name: string | null; date_of_birth: string | null; gender: Gender | null }
+  suggestions: {
+    national_id: string | null; first_name: string | null; last_name: string | null; date_of_birth: string | null; gender: Gender | null
+    document_type?: 'passport' | 'national_id' | 'licence' | null; document_number?: string | null
+  }
   text_read: boolean; problems: string[]
 }
 export interface Payment { id: number | null; paid_on: string; amount: Money; method: string; reference: string | null }
@@ -121,6 +124,30 @@ export class ApiError extends Error {
   }
 }
 
+// Each tab keeps the credential issued at login; a username alone cannot select a session.
+const TAB_SESSION = 'mcl-staff-session'
+type TabSession = { username: string; token: string }
+let memorySession: TabSession | null = null
+
+function tabSession(): TabSession | null {
+  try { return (JSON.parse(sessionStorage.getItem(TAB_SESSION) ?? 'null') as TabSession | null) ?? memorySession }
+  catch { return memorySession }
+}
+
+function setTabSession(session: TabSession | null) {
+  memorySession = session
+  try {
+    if (session) sessionStorage.setItem(TAB_SESSION, JSON.stringify(session))
+    else sessionStorage.removeItem(TAB_SESSION)
+  } catch { /* Keep this tab's credential in memory when storage is unavailable. */ }
+}
+
+/** Headers shared by staff API calls, photos and document downloads. */
+export function staffHeaders(path: string): Record<string, string> {
+  const session = path.startsWith('/api/staff/') ? tabSession() : null
+  return session ? { 'X-MCL-User': session.username, 'X-MCL-Tab': session.token } : {}
+}
+
 async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
   const form = body instanceof FormData
   let res: Response
@@ -129,7 +156,7 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
       method,
       credentials: 'same-origin',
       // FormData sets its own multipart Content-Type (with the boundary).
-      headers: body === undefined || form ? undefined : { 'Content-Type': 'application/json' },
+      headers: { ...staffHeaders(path), ...(body === undefined || form ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : form ? body : JSON.stringify(body),
     })
   } catch {
@@ -155,8 +182,15 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
 
 export const api = {
   staff: {
-    login: (username: string, password: string) => request<StaffUser>('POST', '/api/staff/login', { username, password }),
-    logout: () => request<void>('POST', '/api/staff/logout'),
+    login: async (username: string, password: string) => {
+      setTabSession(null) // sign in as anyone, whoever this tab was before
+      const { tab_token, ...user } = await request<StaffUser & { tab_token: string }>('POST', '/api/staff/login', { username, password })
+      setTabSession({ username: user.username, token: tab_token })
+      return user
+    },
+    logout: async () => {
+      try { await request<void>('POST', '/api/staff/logout') } finally { setTabSession(null) }
+    },
     me: () => request<StaffUser>('GET', '/api/staff/me'),
     dashboard: () => request<Dashboard>('GET', '/api/staff/dashboard'),
     loans: (state?: LoanState) => request<LoanSummary[]>('GET', `/api/staff/loans${state ? `?state=${state}` : ''}`),
