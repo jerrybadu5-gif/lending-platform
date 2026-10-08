@@ -40,6 +40,9 @@ class Settings(BaseSettings):
 
     # Sessions. Set a long random secret in production (python -c "import secrets;print(secrets.token_urlsafe(48))").
     session_secret: str = "dev-only-change-me"
+    # McLender's own database (sessions, sign-in codes, rate limits; later settings and the audit log), e.g.
+    # postgresql+psycopg://mclender:<password>@postgresql:5432/mclender. Empty: kept in memory (lost on restart).
+    database_url: str = ""
     session_hours: int = 10
     cookie_secure: bool = False
     # Write SMS text (including sign-in codes) to the log. Sample data always does; with Fineract only

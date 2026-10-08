@@ -13,6 +13,7 @@ from .config import Settings
 from .domain.risk import Policy
 from .security import OtpStore, RateLimiter, SessionStore
 from .sms import SmsSender
+from .store import DbOtpStore, DbRateLimiter, DbSessionStore
 
 
 @dataclass
@@ -20,13 +21,13 @@ class Services:
     settings: Settings
     backend: LendingBackend
     sms: SmsSender
-    otp: OtpStore
+    otp: OtpStore | DbOtpStore
     policy: Policy
-    login_limit: RateLimiter
-    otp_limit: RateLimiter
-    sessions: SessionStore
+    login_limit: RateLimiter | DbRateLimiter
+    otp_limit: RateLimiter | DbRateLimiter
+    sessions: SessionStore | DbSessionStore
     # At most 2 'come and sign' SMS resends per loan in 10 minutes (cost, and not to pester borrowers).
-    resend_limit: RateLimiter = field(default_factory=lambda: RateLimiter(2, 600))
+    resend_limit: RateLimiter | DbRateLimiter = field(default_factory=lambda: RateLimiter(2, 600))
 
     def today(self) -> date:
         return datetime.now(local_zone(self.settings.timezone)).date()

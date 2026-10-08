@@ -22,6 +22,10 @@ dependencies = [
   "opencv-python-headless>=4.10",  # finds the face on an ID card
   "pytesseract>=0.3.13",  # reads an ID card's text (needs the tesseract-ocr program, see Dockerfile)
   "pypdfium2>=4.30",  # renders a scanned ID card PDF to an image
+  "sqlalchemy>=2.0",  # McLender's own database: sessions, codes, rate limits (later settings, audit log)
+  "alembic>=1.13",  # its migrations (api/migrations), run at start-up
+  "psycopg[binary]>=3.2",  # PostgreSQL driver
+  "cryptography>=43",  # encrypts stored sessions
 ]
 
 [project.optional-dependencies]

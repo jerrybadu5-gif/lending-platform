@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 $stamp = Get-Date -Format "yyyyMMdd-HHmm"
 New-Item -ItemType Directory -Force -Path backups | Out-Null
 
-foreach ($db in @("fineract_tenants", "fineract_default")) {
+foreach ($db in @("fineract_tenants", "fineract_default", "mclender")) {
     docker compose exec -T postgresql sh -c "pg_dump -U `$POSTGRES_USER -Fc $db > /backups/$db-$stamp.dump"
     if ($LASTEXITCODE -ne 0) { throw "Backup of $db failed" }
 }

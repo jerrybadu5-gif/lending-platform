@@ -46,6 +46,22 @@ services:
       - fineract_content:/data/fineract-content
     restart: "no"
 
+  # Creates McLender's own database (sessions, sign-in codes, lock-outs; later settings and the audit log)
+  # on every start, so an existing install gets it too. Skipped until MCLENDER_DB_PASSWORD is set.
+  mclender-db-init:
+    image: postgres:${POSTGRES_TAG:-16}
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MCLENDER_DB_PASSWORD: ${MCLENDER_DB_PASSWORD:-}
+    volumes:
+      - ./mclender-db.sh:/mclender-db.sh:ro
+    entrypoint: ["sh", "/mclender-db.sh"]
+    restart: "no"
+
   fineract-server:
     image: ${FINERACT_IMAGE:-apache/fineract:latest}
     restart: unless-stopped
@@ -113,9 +129,14 @@ services:
     image: ${MCLENDER_API_IMAGE:-mclender-api:local}
     restart: unless-stopped
     depends_on:
-      - fineract-server
+      fineract-server:
+        condition: service_started
+      mclender-db-init:
+        condition: service_completed_successfully
     environment:
       MCL_BACKEND: ${MCL_BACKEND:-fineract}
+      # Empty password = not set up yet: the API then keeps sign-ins in memory (see deploy/mclender-db.sh)
+      MCL_DATABASE_URL: postgresql+psycopg://mclender:${MCLENDER_DB_PASSWORD:-}@postgresql:5432/mclender
       MCL_COMPANY_NAME: ${COMPANY_NAME}
       MCL_TIMEZONE: ${TIMEZONE}
       MCL_FINERACT_URL: http://fineract-server:8080
