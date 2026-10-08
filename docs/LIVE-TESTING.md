@@ -41,6 +41,8 @@ Check whether it's ready (repeat every minute or so):
 curl.exe -s http://localhost:8080/fineract-provider/actuator/health
 ```
 
+(Use the port you set as `FINERACT_PORT` in `deploy\.env` if it isn't 8080.)
+
 It's ready when this shows `{"status":"UP"...}`. To watch it start: `docker compose logs -f fineract-server`
 (Ctrl+C stops watching, not Fineract).
 
@@ -169,5 +171,21 @@ docker compose down -v       # DELETE all test data and start from step 2
 | Health check never says UP | `docker compose logs fineract-server --tail 50`; often memory: give Docker more in Docker Desktop > Settings > Resources |
 | McLender says it can't reach Fineract | `docker compose logs mclender-api --tail 50` |
 | Sign-in to the portal says nothing was found | Re-run step 3, then check Mary's mobile number in Mifos X is 70123344 |
+| Mifos X: "Http failure response for http://localhost:**18080**/…" (an old port) after changing `FINERACT_PORT` | Mifos X still has the old address. `docker compose up -d --force-recreate web-app mclender-api`, then open Mifos X in an incognito window (or F12 > Application > Storage > Clear site data). Check: `docker compose exec web-app printenv \| Select-String FINERACT` shows the new port |
+| Mifos X sign-in: "Http failure response … /authentication: **500**" and the Fineract log says *"There is no PasswordEncoder mapped"* or *"must have a password encoding prefix"* | The `mifos` password was changed directly in the database in an old format. Put it back to `password` (see below), sign in, and change it again in Mifos X |
+| Mifos X sign-in: "Http failure response … /authentication: **401**" | Wrong username or password. Forgotten the `mifos` password? Reset it to `password` (see below) |
+| Mifos X: signed in, but Clients and Loans stay empty; F12 > Console shows *"blocked by CORS policy"* with **401 (Unauthorized)**, and *"0 Unknown Error"* for notifications | Mifos X is still sending the password you signed in with, which no longer works (you changed it while signed in). Sign out, F12 > Application > Storage > Clear site data, and sign in again with the new password. The CORS message is only a side effect of the 401 |
+| *"0 Unknown Error"* once, right after a restart | Fineract was starting. Wait until the health check says UP and press Ctrl+F5 |
+| `setup-test.py` says it can't sign in to Fineract after you changed the `mifos` password | Give it the new one first, in the same window: `$env:FINERACT_PASSWORD="your new password"` |
+
+**Reset the `mifos` password to `password`** (test servers only; from the `deploy` folder):
+
+```powershell
+docker compose exec postgresql psql -U root -d fineract_default -c "UPDATE m_appuser SET password='{noop}password' WHERE username='mifos';"
+```
+
+It should print `UPDATE 1`. Sign in to Mifos X as `mifos` / `password`, then change it at once (user menu > Settings >
+Change Password): `{noop}` keeps the password unencrypted until you do. Change it only in Mifos X, then sign out and
+in again. Use your `POSTGRES_USER` from `deploy\.env` in place of `root` if you changed it.
 
 Copy any error to Claude as text, with the command you ran.

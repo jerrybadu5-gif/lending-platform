@@ -1,0 +1,11 @@
+Employer,Department of Education - Test Payroll
+Remittance to,Breez Lending Ltd
+Pay period,21 (25/09/2026 - 08/10/2026),Pay date,09/10/2026
+Pay Period,Pay Date,Employee No,Surname,Given Names,NID Number,Deduction Code,Loan Reference,Amount (PGK)
+21,09/10/2026,T-3344,KILA,Mary,,BRZ01,,472.80
+21,09/10/2026,T-4567,WAMBI,Peter,,BRZ01,,793.07
+21,09/10/2026,T-5678,ILAVE,Joyce,,BRZ01,,700.00
+21,09/10/2026,,KILA,Mary,,BRZ01,,50.00
+21,09/10/2026,T-9001,TOM,Grace,2015 6612 0034,BRZ01,,620.00
+21,09/10/2026,T-4567,WAMBI,Peter,,BRZ01,,793.07
+,,,,,,,TOTAL,3428.94
