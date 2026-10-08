@@ -271,8 +271,7 @@ def test_two_people_signed_in_in_one_browser(client):
     assert client.get("/api/staff/me", headers=grace).json()["display_name"] == "Grace Pokana"
     assert client.get("/api/staff/me", headers=john).json()["display_name"] == "John Kerema"
     assert client.get("/api/staff/me").status_code == 401
-    for forged in ({"X-MCL-User": "demo"}, {**john, "X-MCL-User": "demo"},
-                   {**grace, "X-MCL-Tab": "wrong"}):
+    for forged in ({"X-MCL-User": "demo"}, {**john, "X-MCL-User": "demo"}, {**grace, "X-MCL-Tab": "wrong"}):
         assert client.get("/api/staff/me", headers=forged).status_code == 401
         assert client.post("/api/staff/logout", headers=forged).status_code == 401
     assert "tab_credential" not in client.get("/api/staff/me", headers=grace).json()
@@ -295,9 +294,12 @@ def test_successful_sign_ins_do_not_lock_anyone_out(client):
 def test_self_approval_setting_and_decision(staff, enabled):
     settings = staff.app.state.services.settings
     settings.allow_self_approval = True
-    assert staff.post("/api/staff/loans/538/submit", json={
-        "recommendation": "APPROVE", "note": "Checked all documents myself."
-    }).status_code == 200
+    assert (
+        staff.post(
+            "/api/staff/loans/538/submit", json={"recommendation": "APPROVE", "note": "Checked all documents myself."}
+        ).status_code
+        == 200
+    )
     settings.allow_self_approval = enabled
     assert staff.get("/api/staff/me").json()["allow_self_approval"] is enabled
     assert staff.post("/api/staff/loans/538/approve", json={"amount": "1200"}).status_code == (200 if enabled else 409)

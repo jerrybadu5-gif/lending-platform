@@ -105,8 +105,11 @@ async def logout(request: Request, response: Response, svc: Services = Depends(s
 @router.get("/me", response_model=StaffUser)
 async def me(s: StaffSession = Depends(staff_session), svc: Services = Depends(services)):
     return StaffUser(
-        username=s.username, display_name=s.display_name, roles=s.roles, review_required=svc.settings.review_required,
-        allow_self_approval=svc.settings.allow_self_approval
+        username=s.username,
+        display_name=s.display_name,
+        roles=s.roles,
+        review_required=svc.settings.review_required,
+        allow_self_approval=svc.settings.allow_self_approval,
     )
 
 
