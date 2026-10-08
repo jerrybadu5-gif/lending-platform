@@ -64,6 +64,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         engine = None
         if usable_url(settings.database_url):
+            # Sessions, codes and lock-outs survive a restart. A database that is set up but can't be
+            # reached stops the start-up with the reason, rather than silently forgetting sign-ins.
             engine = make_engine(settings.database_url)
             migrate(engine)
             kinds = {"staff": StaffSession, "portal": PortalSession}
