@@ -11,6 +11,8 @@ McLender is a staff app and a borrower portal on top of [Apache Fineract](https:
 | **Borrower portal** `/portal` | Sign in with phone number and SMS code, see what is left to pay and when, how to pay with a payment reference, payment history, loan quote and application. Installable on a phone (PWA) |
 | **Affordability check** | Debt-to-income, debt service cover, credit score and a 0–100 risk score, giving APPROVE, REFER or DECLINE. It recommends only; a credit manager decides |
 
+**Project plan (phases, dates, how changes reach `main` and the live system): [docs/PROJECT-PLAN.md](docs/PROJECT-PLAN.md).**
+
 Why Fineract instead of building a ledger from scratch: [docs/DECISION.md](docs/DECISION.md). How the pieces fit: [docs/MCLENDER.md](docs/MCLENDER.md).
 
 ```
